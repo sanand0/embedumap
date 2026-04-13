@@ -65,6 +65,29 @@ uv run embedumap samples/calvin-images.csv \
   --popup-style grid
 ```
 
+Build centroid trails for selected columns:
+
+```bash
+uv run embedumap samples/blog-text.csv \
+  --embedding-columns text \
+  --color-columns primary_category \
+  --filter-columns primary_category,year \
+  --timeline-column year \
+  --centroid-trails primary_category,cluster
+```
+
+Build centroid trails with a custom time bucket:
+
+```bash
+uv run embedumap samples/mixed-media.csv \
+  --image-columns file \
+  --color-columns theme \
+  --filter-columns theme,person,place \
+  --timeline-column date \
+  --centroid-trails theme,cluster \
+  --centroid-time-period fortnightly
+```
+
 Build an audio-first map:
 
 ```bash
@@ -90,4 +113,9 @@ uvx --from "git+https://github.com/sanand0/embedumap.git@main" embedumap https:/
 - Axis labels are interpreted by Gemini by default using `--cluster-naming-model`; use `--no-axis-labels` to keep `UMAP 1` and `UMAP 2`.
 - Embeddings are cached by default in `embedumap.duckdb` next to the output HTML.
 - `--cluster-names` adds a lightweight Gemini naming pass after deterministic clustering.
+- `--centroid-trails` takes one or more column names, for example `--centroid-trails primary_category,cluster`. Include `cluster` explicitly when you want cluster trails.
+- `--centroid-time-period` overrides the default bucket size used for centroid trails. Examples: `1h`, `2.5h`, `2h 15min`, `3d`, `daily`, `weekly`, `30d`, `2Q`, `fortnightly`.
+- If `--centroid-time-period` is omitted, centroid trails default to yearly buckets for year timelines, daily buckets for date timelines, and monthly buckets for datetime timelines.
+- Requested centroid trail columns are added to the available color dimensions so you can switch trail views in the UI.
+- Trail nodes are only created for time buckets with at least 2 points, and a trail is only drawn when a group has at least 2 such buckets.
 - The pipeline still stays intentionally small: no thumbnails, no sidecar JSON, no transcription pipeline.

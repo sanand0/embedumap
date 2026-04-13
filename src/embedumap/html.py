@@ -594,10 +594,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     align-items: center;
     gap: 10px;
     flex: 1;
+    flex-wrap: wrap;
     min-width: min(720px, 100%);
   }
 
   #timeline-wrap.visible { display: flex; }
+
+  #timeline-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
 
   .timeline-label {
     color: var(--text-dim);
@@ -611,6 +619,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   #timeline-play.playing {
     background: rgba(239, 68, 68, 0.16);
     border-color: rgba(239, 68, 68, 0.4);
+  }
+
+  #timeline-speed-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #timeline-speed {
+    width: 110px;
+    accent-color: var(--accent);
+  }
+
+  #timeline-speed-value {
+    min-width: 3.5ch;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    text-align: right;
   }
 
   .range-block {
@@ -731,6 +757,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id="color-group" class="button-group"></div>
     <span class="label">Filter</span>
     <div id="filter-group" class="button-group"></div>
+    <div id="trails-group" class="button-group" style="display:none">
+      <button id="trails-toggle">Trails</button>
+    </div>
+    <div id="page-switch-group" class="button-group" style="display:none"></div>
     <div id="status-stack">
       <div id="summary" class="label"></div>
       <div id="axis-legend" aria-label="Projection axes">
@@ -756,7 +786,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   <div id="timeline-bar">
     <div id="timeline-wrap">
-      <button id="timeline-play" type="button">▶ Play</button>
+      <div id="timeline-tools">
+        <button id="timeline-play" type="button">&#9654; Play</button>
+        <span class="label">Playback</span>
+        <div id="timeline-mode-group" class="button-group"></div>
+        <label id="timeline-speed-wrap" for="timeline-speed">
+          <span class="label">Speed</span>
+          <input id="timeline-speed" type="range" min="25" max="400" step="25" value="100">
+          <span id="timeline-speed-value"></span>
+        </label>
+      </div>
       <span id="timeline-start" class="timeline-label"></span>
       <div class="range-block" id="timeline-range">
         <div class="timeline-line"></div>
@@ -801,6 +840,11 @@ const margin = { top: 18, right: 18, bottom: 18, left: 18 };
 const pointRadius = 4;
 const sliderMax = 10000;
 const playDurationMs = 12000;
+const defaultPlaySpeed = 100;
+const PLAYBACK_MODES = [
+  { id: "slide", label: "Slide" },
+  { id: "reveal", label: "Reveal" },
+];
 
 const plot = $("#plot");
 const overlay = d3.select("#overlay");
@@ -827,12 +871,15 @@ let height = 0;
 let dpr = window.devicePixelRatio || 1;
 let xScale = d3.scaleLinear();
 let yScale = d3.scaleLinear();
+let baseXScale = d3.scaleLinear();
+let baseYScale = d3.scaleLinear();
 let xDomain = [0, 1];
 let yDomain = [0, 1];
 let quadtree = null;
 let dragState = null;
 let playRaf = 0;
 let playPrev = null;
+let zoomTransform = d3.zoomIdentity;
 
 const TIMELINE_FORMATTERS = {
   year: new Intl.DateTimeFormat(undefined, { year: "numeric", timeZone: "UTC" }),
@@ -880,6 +927,14 @@ function formatDuration(ms0, ms1) {
   const years = Math.floor(totalMonths / 12);
   const months = totalMonths % 12;
   return months ? `${years}y ${months}m` : `${years}y`;
+}
+
+function formatPlaySpeedValue() {
+  return `${(state.playSpeed / 100).toFixed(2).replace(/\\.?0+$/, "")}x`;
+}
+
+function playbackDurationMs() {
+  return playDurationMs / Math.max(0.25, state.playSpeed / 100);
 }
 
 function sliderToMs(value) {
@@ -952,6 +1007,7 @@ function syncUrlState() {
   }
   if (state.sortColumn !== DATA.defaultSort) params.set("sort", state.sortColumn);
   if (!state.sortAsc) params.set("dir", "desc");
+  if (DATA.centroidTrails && Object.keys(DATA.centroidTrails).length && state.trailMode !== "both") params.set("trails", state.trailMode);
   const query = params.toString();
   const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
   window.history.replaceState({}, "", nextUrl);
@@ -977,6 +1033,8 @@ function applyUrlState() {
   const sortColumn = params.get("sort");
   if (sortColumn && DATA.sortColumns.includes(sortColumn)) state.sortColumn = sortColumn;
   state.sortAsc = params.get("dir") !== "desc";
+  const trailParam = params.get("trails");
+  if (trailParam && ["both", "trails", "nodes"].includes(trailParam)) state.trailMode = trailParam;
 }
 
 function clearSelectionBox() {
@@ -988,6 +1046,11 @@ function hideTooltip() {
   tooltip.style.display = "none";
 }
 
+function syncPlotScales() {
+  xScale = zoomTransform.rescaleX(baseXScale);
+  yScale = zoomTransform.rescaleY(baseYScale);
+}
+
 function updateSummary(scene) {
   const filtered = scene.filtered;
   const visible = scene.selectable;
@@ -997,6 +1060,10 @@ function updateSummary(scene) {
 }
 
 function rebuildSpatialIndex(scene) {
+  if (!showScatterNodes()) {
+    quadtree = null;
+    return;
+  }
   quadtree = d3.quadtree()
     .x((row) => xScale(row.x))
     .y((row) => yScale(row.y))
@@ -1055,6 +1122,205 @@ function updateBarChart(scene) {
   merged.sort((left, right) => d3.descending(left.count, right.count) || d3.ascending(left.label, right.label));
 }
 
+function activeTrails() {
+  if (!DATA.centroidTrails) return [];
+  return DATA.centroidTrails[state.colorBy] || DATA.centroidTrails["cluster"] || [];
+}
+
+let trailDots = [];
+
+function showTrailLines() {
+  return state.trailMode !== "nodes";
+}
+
+function showTrailNodes() {
+  return state.trailMode !== "trails";
+}
+
+function showScatterNodes() {
+  return state.trailMode !== "trails";
+}
+
+function trailPointBounds(point) {
+  if (Number.isFinite(point.timeStartMs) && Number.isFinite(point.timeEndMs)) {
+    return { start: point.timeStartMs, end: point.timeEndMs };
+  }
+  if (!DATA.timelineColumn || DATA.timelineMin == null || DATA.timelineMax == null) {
+    return { start: Number.NEGATIVE_INFINITY, end: Number.POSITIVE_INFINITY };
+  }
+  if (DATA.timelineKind === "year") {
+    const year = Number(point.time);
+    if (!Number.isFinite(year)) return { start: Number.NEGATIVE_INFINITY, end: Number.POSITIVE_INFINITY };
+    return { start: Date.UTC(year, 0, 1), end: Date.UTC(year + 1, 0, 1) - 1 };
+  }
+  const bucket = Array.isArray(point.time) ? point.time : [];
+  const year = Number(bucket[0]);
+  const month = Number(bucket[1]);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) {
+    return { start: Number.NEGATIVE_INFINITY, end: Number.POSITIVE_INFINITY };
+  }
+  if (DATA.timelineKind === "date") {
+    const day = Number(bucket[2]);
+    if (!Number.isFinite(day)) return { start: Number.NEGATIVE_INFINITY, end: Number.POSITIVE_INFINITY };
+    const start = Date.UTC(year, month - 1, day);
+    return { start, end: Date.UTC(year, month - 1, day + 1) - 1 };
+  }
+  const start = Date.UTC(year, month - 1, 1);
+  return { start, end: Date.UTC(year, month, 1) - 1 };
+}
+
+function trailPointInRange(point) {
+  const bounds = trailPointBounds(point);
+  return bounds.end >= state.timelineMin && bounds.start <= state.timelineMax;
+}
+
+function trailSegmentInRange(left, right) {
+  const leftBounds = trailPointBounds(left);
+  const rightBounds = trailPointBounds(right);
+  const segmentStart = Math.min(leftBounds.start, rightBounds.start);
+  const segmentEnd = Math.max(leftBounds.end, rightBounds.end);
+  return segmentEnd >= state.timelineMin && segmentStart <= state.timelineMax;
+}
+
+function strokeTrailSegment(ctx, left, right) {
+  ctx.beginPath();
+  ctx.moveTo(xScale(left.x), yScale(left.y));
+  ctx.lineTo(xScale(right.x), yScale(right.y));
+  ctx.stroke();
+}
+
+function strokeTrailArrow(ctx, left, right) {
+  const x1 = xScale(left.x), y1 = yScale(left.y);
+  const x2 = xScale(right.x), y2 = yScale(right.y);
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.beginPath();
+  ctx.moveTo(mx - 6 * Math.cos(angle - 0.45), my - 6 * Math.sin(angle - 0.45));
+  ctx.lineTo(mx, my);
+  ctx.lineTo(mx - 6 * Math.cos(angle + 0.45), my - 6 * Math.sin(angle + 0.45));
+  ctx.stroke();
+}
+
+function trailRange(key) {
+  let min = Infinity, max = 0;
+  for (const trail of activeTrails()) for (const point of trail.points) { min = Math.min(min, point[key] ?? 0); max = Math.max(max, point[key] ?? 0); }
+  return { min, max: max || 1 };
+}
+
+function trailActiveAlpha(filtered, isHighlighted) {
+  if (filtered) return 0.06;
+  return isHighlighted ? 0.9 : 0.12;
+}
+
+function trailContextAlpha(filtered, isHighlighted) {
+  if (filtered) return 0.015;
+  return isHighlighted ? 0.18 : 0.03;
+}
+
+function drawTrails(ctx) {
+  trailDots = [];
+  if (!showTrailLines() && !showTrailNodes()) return;
+  const trails = activeTrails();
+  if (!trails.length) return;
+  const scale = colorScale();
+  const highlight = state.highlightTrailCluster;
+  const filterVal = state.filters[state.colorBy];
+  const { min: cMin, max: cMax } = trailRange("count");
+  const { min: sMin, max: sMax } = trailRange("std");
+
+  for (const trail of trails) {
+    const pts = trail.points;
+    if (pts.length < 2) continue;
+
+    const filtered = filterVal && trail.groupLabel !== filterVal;
+    const isHighlighted = !filtered && (highlight == null || highlight === trail.groupId);
+    const activeAlpha = trailActiveAlpha(filtered, isHighlighted);
+    const contextAlpha = trailContextAlpha(filtered, isHighlighted);
+    const color = scale(trail.groupLabel);
+    const activePoints = pts.map((pt) => trailPointInRange(pt));
+    const visiblePoints = pts.filter((pt, index) => activePoints[index]);
+
+    ctx.save();
+    if (showTrailLines()) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isHighlighted ? 2.5 : 1.2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      // Keep the full trail faintly visible so the moving in-range segment has context during playback.
+      ctx.globalAlpha = contextAlpha;
+      for (let i = 0; i < pts.length - 1; i++) {
+        strokeTrailSegment(ctx, pts[i], pts[i + 1]);
+      }
+      ctx.globalAlpha = activeAlpha;
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (!trailSegmentInRange(pts[i], pts[i + 1])) continue;
+        strokeTrailSegment(ctx, pts[i], pts[i + 1]);
+      }
+    }
+
+    if (showTrailLines() && isHighlighted) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (!trailSegmentInRange(pts[i], pts[i + 1])) continue;
+        strokeTrailArrow(ctx, pts[i], pts[i + 1]);
+      }
+    }
+
+    if (showTrailNodes()) {
+      for (let i = 0; i < pts.length; i++) {
+        const px = xScale(pts[i].x), py = yScale(pts[i].y);
+        const countNorm = cMax > cMin ? (pts[i].count - cMin) / (cMax - cMin) : 0.5;
+        const baseR = isHighlighted ? 5 : 3;
+        const r = baseR + countNorm * baseR;
+        const ageFactor = pts.length > 1 ? i / (pts.length - 1) : 1;
+        const pointAlpha = activePoints[i] ? activeAlpha : contextAlpha;
+        ctx.globalAlpha = pointAlpha * (0.4 + 0.6 * ageFactor);
+
+        const stdNorm = sMax > sMin ? ((pts[i].std ?? 0) - sMin) / (sMax - sMin) : 0;
+        const blur = r + stdNorm * r * 2;
+        const grad = ctx.createRadialGradient(px, py, 0, px, py, blur);
+        grad.addColorStop(0, color);
+        grad.addColorStop(stdNorm < 0.3 ? 0.7 : 0.4, color);
+        grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(px, py, blur, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "rgba(255,255,255,0.6)";
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        if (activePoints[i]) {
+          trailDots.push({ px, py, r: Math.max(r, blur), trail, pt: pts[i] });
+        }
+      }
+    }
+
+    if (isHighlighted && visiblePoints.length >= 1) {
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "bold 10px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(
+        visiblePoints[0].timeLabel,
+        xScale(visiblePoints[0].x),
+        yScale(visiblePoints[0].y) - 8,
+      );
+      ctx.textBaseline = "top";
+      ctx.fillText(
+        visiblePoints[visiblePoints.length - 1].timeLabel,
+        xScale(visiblePoints[visiblePoints.length - 1].x),
+        yScale(visiblePoints[visiblePoints.length - 1].y) + 8,
+      );
+    }
+
+    ctx.restore();
+  }
+}
+
 function draw(scene = sceneRows()) {
   if (!DATA || !state) return;
   const rows = scene.filtered;
@@ -1062,37 +1328,51 @@ function draw(scene = sceneRows()) {
   const selected = state.selectedIds;
   const hasSelection = selected.size > 0;
   const baseOpacity = Math.max(0, Math.min(1, DATA.opacity ?? 1));
+  const trailsOn = activeTrails().length && state.trailMode !== "nodes";
+  const pointOpacity = trailsOn ? baseOpacity * 0.4 : baseOpacity;
   const ctx = plot.getContext("2d");
   ctx.clearRect(0, 0, width, height);
 
-  for (let pass = 0; pass < 2; pass += 1) {
-    for (const row of rows) {
-      const active = inTimeline(row) || !DATA.timelineColumn;
-      const chosen = selected.has(row.id);
-      let alpha = active ? baseOpacity : Math.max(0.03, baseOpacity * 0.12);
-      if (hasSelection && !chosen) alpha = active ? Math.max(0.05, baseOpacity * 0.16) : Math.max(0.02, baseOpacity * 0.06);
-      if (hasSelection && chosen) alpha = baseOpacity;
-      const bright = alpha >= Math.max(0.25, baseOpacity * 0.45);
-      if (pass === 0 && bright) continue;
-      if (pass === 1 && !bright) continue;
+  if (showScatterNodes()) {
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (const row of rows) {
+        const active = inTimeline(row) || !DATA.timelineColumn;
+        const chosen = selected.has(row.id);
+        let alpha = active ? pointOpacity : Math.max(0.03, pointOpacity * 0.12);
+        if (hasSelection && !chosen) alpha = active ? Math.max(0.05, pointOpacity * 0.16) : Math.max(0.02, pointOpacity * 0.06);
+        if (hasSelection && chosen) alpha = baseOpacity;
+        const bright = alpha >= Math.max(0.25, pointOpacity * 0.45);
+        if (pass === 0 && bright) continue;
+        if (pass === 1 && !bright) continue;
 
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = scale(colorValue(row));
-      ctx.beginPath();
-      ctx.arc(xScale(row.x), yScale(row.y), chosen ? pointRadius + 1.6 : pointRadius, 0, Math.PI * 2);
-      ctx.fill();
-      if (chosen) {
-        ctx.globalAlpha = Math.min(1, baseOpacity);
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = 1.1;
-        ctx.stroke();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = scale(colorValue(row));
+        ctx.beginPath();
+        ctx.arc(xScale(row.x), yScale(row.y), chosen ? pointRadius + 1.6 : pointRadius, 0, Math.PI * 2);
+        ctx.fill();
+        if (chosen) {
+          ctx.globalAlpha = Math.min(1, baseOpacity);
+          ctx.strokeStyle = "rgba(255,255,255,0.9)";
+          ctx.lineWidth = 1.1;
+          ctx.stroke();
+        }
       }
     }
   }
+
+  // Draw centroid trails on top of points
+  drawTrails(ctx);
+
   ctx.globalAlpha = 1;
   updateSummary(scene);
   rebuildSpatialIndex(scene);
   updateBarChart(scene);
+}
+
+function resetZoom() {
+  zoomTransform = d3.zoomIdentity;
+  syncPlotScales();
+  refreshScene({ syncUrl: false });
 }
 
 function resize() {
@@ -1107,8 +1387,9 @@ function resize() {
   plot.style.height = `${height}px`;
   const ctx = plot.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  xScale = d3.scaleLinear().domain(xDomain).range([margin.left, width - margin.right]);
-  yScale = d3.scaleLinear().domain(yDomain).range([height - margin.bottom, margin.top]);
+  baseXScale = d3.scaleLinear().domain(xDomain).range([margin.left, width - margin.right]);
+  baseYScale = d3.scaleLinear().domain(yDomain).range([height - margin.bottom, margin.top]);
+  syncPlotScales();
   overlay.attr("width", width).attr("height", height);
   refreshScene({ syncUrl: false });
 }
@@ -1260,6 +1541,10 @@ function dismissPopup({ clearSelection = true, redraw = true } = {}) {
 }
 
 function syncSelectionToVisible(scene) {
+  if (!showScatterNodes()) {
+    state.selectedIds = new Set();
+    return;
+  }
   if (!state.selectedIds.size) return;
   const allowed = new Set(scene.selectable.map((row) => row.id));
   state.selectedIds = new Set([...state.selectedIds].filter((id) => allowed.has(id)));
@@ -1291,6 +1576,7 @@ function buildColorControls() {
     const button = event.target.closest("[data-color]");
     if (!button) return;
     state.colorBy = button.dataset.color;
+    state.highlightTrailCluster = null;
     for (const candidate of group.querySelectorAll("button")) {
       candidate.classList.toggle("active", candidate === button);
     }
@@ -1339,6 +1625,7 @@ function syncControlsFromState() {
   }
   syncSortControls();
   syncTimelineUi();
+  syncPlaybackControls();
 }
 
 function syncTimelineUi() {
@@ -1357,6 +1644,15 @@ function syncTimelineUi() {
   $("#timeline-fill").style.width = `${((end - start) / sliderMax) * 100}%`;
 }
 
+function syncPlaybackControls() {
+  const speedInput = $("#timeline-speed");
+  if (speedInput) speedInput.value = String(state.playSpeed);
+  $("#timeline-speed-value").textContent = formatPlaySpeedValue();
+  for (const button of $("#timeline-mode-group").querySelectorAll("button")) {
+    button.classList.toggle("active", button.dataset.playbackMode === state.playbackMode);
+  }
+}
+
 function pausePlay() {
   state.playing = false;
   $("#timeline-play").textContent = "▶ Play";
@@ -1371,8 +1667,11 @@ function stepPlay(timestamp) {
   playPrev = timestamp;
   const windowSize = state.timelineMax - state.timelineMin;
   const fullRange = Math.max(1, DATA.timelineMax - DATA.timelineMin);
-  state.timelineMax = Math.min(DATA.timelineMax, state.timelineMax + (delta * fullRange) / playDurationMs);
-  state.timelineMin = Math.max(DATA.timelineMin, state.timelineMax - windowSize);
+  state.timelineMax = Math.min(DATA.timelineMax, state.timelineMax + (delta * fullRange) / playbackDurationMs());
+  // "Reveal" keeps the left edge fixed so Anand can inspect every intermediate state.
+  if (state.playbackMode === "slide") {
+    state.timelineMin = Math.max(DATA.timelineMin, state.timelineMax - windowSize);
+  }
   syncTimelineUi();
   refreshScene();
   if (state.timelineMax >= DATA.timelineMax) {
@@ -1385,13 +1684,20 @@ function stepPlay(timestamp) {
 function startPlay() {
   const fullRange = Math.max(1, DATA.timelineMax - DATA.timelineMin);
   let windowSize = state.timelineMax - state.timelineMin;
+  // Reuse the existing readable starter window whenever playback begins from the full range.
   if (windowSize >= fullRange * 0.999) {
     windowSize = Math.max(fullRange * 0.18, fullRange / Math.min(12, Math.max(2, DATA.rows.length)));
     state.timelineMin = DATA.timelineMin;
     state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
   } else if (state.timelineMax >= DATA.timelineMax) {
-    state.timelineMin = DATA.timelineMin;
-    state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
+    if (state.playbackMode === "reveal") {
+      const replayStart = Math.max(DATA.timelineMin, DATA.timelineMax - windowSize);
+      state.timelineMin = Math.min(state.timelineMin, replayStart);
+      state.timelineMax = Math.min(DATA.timelineMax, state.timelineMin + windowSize);
+    } else {
+      state.timelineMin = DATA.timelineMin;
+      state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
+    }
   }
   state.playing = true;
   playPrev = null;
@@ -1407,10 +1713,16 @@ function buildTimelineControls() {
   const minInput = $("#timeline-min");
   const maxInput = $("#timeline-max");
   const timelineFill = $("#timeline-fill");
+  const modeGroup = $("#timeline-mode-group");
+  const speedInput = $("#timeline-speed");
   minInput.min = "0";
   minInput.max = String(sliderMax);
   maxInput.min = "0";
   maxInput.max = String(sliderMax);
+  // Keep the new playback controls isolated to the timeline so the rest of the viewer stays untouched.
+  modeGroup.innerHTML = PLAYBACK_MODES.map((mode) => (
+    `<button type="button" data-playback-mode="${escapeHtml(mode.id)}">${escapeHtml(mode.label)}</button>`
+  )).join("");
 
   minInput.addEventListener("input", () => {
     const next = Math.min(Number(minInput.value), Number(maxInput.value) - 100);
@@ -1472,12 +1784,23 @@ function buildTimelineControls() {
   timelineFill.addEventListener("pointerup", finishRangeDrag);
   timelineFill.addEventListener("pointercancel", finishRangeDrag);
 
+  modeGroup.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-playback-mode]");
+    if (!button) return;
+    state.playbackMode = button.dataset.playbackMode;
+    syncPlaybackControls();
+  });
+  speedInput.addEventListener("input", () => {
+    state.playSpeed = Number(speedInput.value) || defaultPlaySpeed;
+    syncPlaybackControls();
+  });
   $("#timeline-play").addEventListener("click", () => {
     if (state.playing) pausePlay();
     else startPlay();
   });
 
   syncTimelineUi();
+  syncPlaybackControls();
 }
 
 function pointerPosition(event) {
@@ -1503,7 +1826,10 @@ function updateSelectionBox() {
 }
 
 function handlePointClick(event) {
-  if (!quadtree) return;
+  if (!showScatterNodes() || !quadtree) {
+    dismissPopup();
+    return;
+  }
   const { x, y } = pointerPosition(event);
   const found = quadtree.find(x, y, 12);
   if (!found) {
@@ -1516,6 +1842,10 @@ function handlePointClick(event) {
 }
 
 function handleBrushSelection(bounds) {
+  if (!showScatterNodes()) {
+    dismissPopup();
+    return;
+  }
   const scene = sceneRows();
   const selected = scene.selectable
     .filter((row) => {
@@ -1531,7 +1861,95 @@ function handleBrushSelection(bounds) {
   else hidePopupOnly();
 }
 
+const TRAIL_MODES = ["both", "trails", "nodes"];
+const TRAIL_LABELS = { both: "Trails + Nodes", trails: "Trails Only", nodes: "Nodes Only" };
+const PAGE_VARIANTS = {
+  "patent-evolution-monthly-2k.html": [
+    { id: "2k", label: "Monthly 2k", href: "patent-evolution-monthly-2k.html" },
+    { id: "4k", label: "Monthly 4k", href: "patent-evolution-monthly-4k.html" },
+  ],
+  "patent-evolution-monthly-4k.html": [
+    { id: "2k", label: "Monthly 2k", href: "patent-evolution-monthly-2k.html" },
+    { id: "4k", label: "Monthly 4k", href: "patent-evolution-monthly-4k.html" },
+  ],
+};
+
+function pageVariants() {
+  const path = window.location.pathname.split("/").pop() || "";
+  return PAGE_VARIANTS[path] || [];
+}
+
+function buildPageSwitchControls() {
+  const variants = pageVariants();
+  if (variants.length < 2) return;
+  const group = $("#page-switch-group");
+  const current = window.location.pathname.split("/").pop() || "";
+  group.style.display = "";
+  group.innerHTML = variants.map((variant) => (
+    `<button data-page-switch="${escapeHtml(variant.href)}" class="${variant.href === current ? "active" : ""}">${escapeHtml(variant.label)}</button>`
+  )).join("");
+  group.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-page-switch]");
+    if (!button) return;
+    const target = button.dataset.pageSwitch;
+    if (!target || target === current) return;
+    window.location.href = target;
+  });
+}
+
+function buildTrailsControls() {
+  if (!DATA.centroidTrails || !Object.keys(DATA.centroidTrails).length) return;
+  const group = $("#trails-group");
+  group.style.display = "";
+  const btn = $("#trails-toggle");
+  btn.textContent = TRAIL_LABELS[state.trailMode];
+  btn.classList.add("active");
+  btn.addEventListener("click", () => {
+    const idx = (TRAIL_MODES.indexOf(state.trailMode) + 1) % TRAIL_MODES.length;
+    state.trailMode = TRAIL_MODES[idx];
+    btn.textContent = TRAIL_LABELS[state.trailMode];
+    if (!showScatterNodes()) dismissPopup({ clearSelection: true, redraw: false });
+    if (state.trailMode === "nodes") state.highlightTrailCluster = null;
+    refreshScene();
+  });
+
+  // Click on bar chart rows to highlight individual trails
+  barChartBody.node().addEventListener("click", (event) => {
+    if (!showTrailLines()) return;
+    const trails = activeTrails();
+    if (!trails.length) return;
+    const row = event.target.closest(".bar-row");
+    if (!row) return;
+    const datum = d3.select(row).datum();
+    if (!datum) return;
+    const trail = trails.find((t) => t.groupLabel === datum.key);
+    if (!trail) return;
+    if (state.highlightTrailCluster === trail.groupId) {
+      state.highlightTrailCluster = null;
+    } else {
+      state.highlightTrailCluster = trail.groupId;
+    }
+    refreshScene();
+  });
+}
+
 function bindInteractions() {
+  const zoomBehavior = d3.zoom()
+    .scaleExtent([1, 20])
+    .filter((event) => !state.playing && (
+      event.type === "wheel"
+      || (event.type === "mousedown" && event.shiftKey && event.button === 0)
+      || event.type === "touchstart"
+    ))
+    .on("zoom", (event) => {
+      zoomTransform = event.transform;
+      syncPlotScales();
+      clearSelectionBox();
+      hideTooltip();
+      refreshScene({ syncUrl: false });
+    });
+  overlay.call(zoomBehavior).on("dblclick.zoom", null);
+
   $("#popup-close").addEventListener("click", () => dismissPopup());
   popupBackdrop.addEventListener("click", () => dismissPopup());
   popupBody.addEventListener("click", (event) => {
@@ -1541,10 +1959,13 @@ function bindInteractions() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") dismissPopup();
+    if (event.key === "0") {
+      overlay.call(zoomBehavior.transform, d3.zoomIdentity);
+    }
   });
 
   overlayNode.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || state.playing) return;
+    if (event.button !== 0 || state.playing || event.shiftKey || !showScatterNodes()) return;
     const { x, y } = pointerPosition(event);
     dragState = { startX: x, startY: y, currentX: x, currentY: y, moved: false };
     overlayNode.setPointerCapture?.(event.pointerId);
@@ -1560,11 +1981,27 @@ function bindInteractions() {
       if (dragState.moved) updateSelectionBox();
       return;
     }
-    if (!quadtree || state.playing || event.buttons > 0) {
+    if (state.playing || event.buttons > 0) {
       hideTooltip();
       return;
     }
     const { x, y } = pointerPosition(event);
+    // Check centroid trail dots first
+    const hitDot = trailDots.find((d) => Math.hypot(d.px - x, d.py - y) <= d.r + 4);
+    if (hitDot) {
+      tooltip.innerHTML = `<div class="tooltip-label">${escapeHtml(hitDot.trail.groupLabel)}</div>`
+        + `<div class="tooltip-grid">`
+        + `<div class="tooltip-key">Period</div><div class="tooltip-value">${escapeHtml(hitDot.pt.timeLabel)}</div>`
+        + `<div class="tooltip-key">Points</div><div class="tooltip-value">${hitDot.pt.count.toLocaleString()}</div>`
+        + `<div class="tooltip-key">Spread</div><div class="tooltip-value">${(hitDot.pt.std ?? 0).toFixed(3)}</div>`
+        + `</div>`;
+      tooltip.style.display = "block";
+      tooltip.style.left = `${Math.min(window.innerWidth - 180, event.clientX + 14)}px`;
+      tooltip.style.top = `${Math.min(window.innerHeight - 100, event.clientY + 14)}px`;
+      return;
+    }
+
+    if (!quadtree) { hideTooltip(); return; }
     const found = quadtree.find(x, y, 12);
     if (!found) {
       hideTooltip();
@@ -1617,6 +2054,10 @@ function boot() {
       timelineMin: DATA.timelineMin,
       timelineMax: DATA.timelineMax,
       playing: false,
+      playbackMode: "slide",
+      playSpeed: defaultPlaySpeed,
+      trailMode: "both",
+      highlightTrailCluster: null,
     };
     globalThis.state = state;
     globalThis.renderPopup = renderPopup;
@@ -1636,6 +2077,8 @@ function boot() {
     buildFilterControls();
     buildSortControls();
     buildTimelineControls();
+    buildTrailsControls();
+    buildPageSwitchControls();
     bindInteractions();
     resize();
     syncUrlState();

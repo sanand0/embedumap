@@ -17,6 +17,7 @@ from .core import (
     build_payload,
     dry_run_report,
     load_csv_source,
+    parse_centroid_time_period,
     prepare_rows,
     split_option_values,
 )
@@ -95,12 +96,33 @@ def run(
     dimensions: int = typer.Option(DEFAULT_DIMENSIONS, "--dimensions", min=128, help="Embedding dimensionality."),
     sample: int | None = typer.Option(None, "--sample", min=1, help="Sample N rows before building."),
     output_path: Path = typer.Option(Path("index.html"), "--output", help="Where to write the HTML output."),
+    centroid_trails_raw: list[str] = typer.Option(
+        [],
+        "--centroid-trails",
+        help='Columns to build centroid trails for. Include "cluster" for cluster trails.',
+    ),
+    centroid_time_period: str | None = typer.Option(
+        None,
+        "--centroid-time-period",
+        help='Optional trail bucket size like "1h", "2h 15min", "daily", "weekly", or "2Q".',
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate inputs without embedding or writing HTML."),
 ) -> None:
     """Build the map or validate the plan for it."""
 
     popup_style = normalize_popup_style(popup_style)
     bar_chart_corner = normalize_bar_chart_corner(bar_chart_corner)
+    timeline_column = timeline_column.strip() if timeline_column else None
+    centroid_trails = split_option_values(centroid_trails_raw)
+    centroid_time_period = centroid_time_period.strip() if centroid_time_period else None
+    if centroid_trails and not timeline_column:
+        raise typer.BadParameter("--centroid-trails requires --timeline-column.")
+    if centroid_time_period and not centroid_trails:
+        raise typer.BadParameter("--centroid-time-period requires --centroid-trails.")
+    try:
+        parse_centroid_time_period(centroid_time_period)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     config = BuildConfig(
         csv_input=csv_input,
         output_path=output_path.expanduser().resolve(),
@@ -112,7 +134,7 @@ def run(
         filter_columns=split_option_values(filter_columns_raw),
         cluster_columns=split_option_values(cluster_columns_raw) or ["embeddings"],
         label_columns=split_option_values(label_columns_raw),
-        timeline_column=timeline_column.strip() if timeline_column else None,
+        timeline_column=timeline_column,
         branding=branding.strip() or "embedumap",
         opacity=opacity,
         bar_chart_corner=bar_chart_corner,
@@ -124,6 +146,8 @@ def run(
         dimensions=dimensions,
         sample=sample,
         dry_run=dry_run,
+        centroid_trails=centroid_trails,
+        centroid_time_period=centroid_time_period,
     )
     if not config.embedding_columns and not config.image_columns and not config.audio_columns:
         raise typer.BadParameter(

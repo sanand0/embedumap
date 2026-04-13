@@ -7,10 +7,11 @@ import json
 import math
 import mimetypes
 import os
-from hashlib import sha256
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urljoin, urlparse
@@ -84,6 +85,8 @@ class BuildConfig:
     dimensions: int
     sample: int | None
     dry_run: bool
+    centroid_trails: list[str]
+    centroid_time_period: str | None
 
 
 @dataclass(slots=True)
@@ -338,6 +341,7 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
     )
     validate_columns(frame, config.color_columns + config.filter_columns + config.label_columns)
     validate_columns(frame, [value for value in config.cluster_columns if value != "embeddings"], allow_special={"embeddings"})
+    validate_columns(frame, [value for value in config.centroid_trails if value != "cluster"], allow_special={"cluster"})
     if config.timeline_column:
         validate_columns(frame, [config.timeline_column])
 
@@ -458,6 +462,10 @@ def dry_run_report(source: CsvSource, config: BuildConfig, records: list[RowReco
         console.print(
             f"Timeline: {config.timeline_column} ({report['timeline_kind'] or 'unknown'}, {report['timeline_valid']}/{report['timeline_non_empty']} parseable)"
         )
+    if config.centroid_trails:
+        console.print(f"Centroid trails: {config.centroid_trails}")
+    if config.centroid_time_period:
+        console.print(f"Centroid time period: {config.centroid_time_period}")
     if report["missing_local_images"]:
         console.print(f"Missing local image references: {report['missing_local_images']}")
     if report["remote_image_rows"]:
@@ -1380,6 +1388,277 @@ def analyze_records(
     return coords, cluster_ids, cluster_labels, axis_labels
 
 
+MIN_CENTROID_BUCKET_SIZE = 2
+MIN_CENTROID_TRAIL_POINTS = 2
+CENTROID_TIME_ALIASES = {
+    "hourly": "1h",
+    "daily": "1d",
+    "weekly": "1w",
+    "fortnightly": "2w",
+    "biweekly": "2w",
+    "monthly": "1 month",
+    "quarterly": "1q",
+    "yearly": "1y",
+    "annual": "1y",
+    "annually": "1y",
+}
+CALENDAR_PERIOD_UNITS = {
+    "mo": "M",
+    "mon": "M",
+    "month": "M",
+    "months": "M",
+    "q": "Q-DEC",
+    "quarter": "Q-DEC",
+    "quarters": "Q-DEC",
+    "y": "Y-DEC",
+    "yr": "Y-DEC",
+    "year": "Y-DEC",
+    "years": "Y-DEC",
+}
+WEEK_PERIOD = re.compile(r"^(?P<count>\d+)\s*(?:w|wk|wks|week|weeks)$", re.IGNORECASE)
+CALENDAR_PERIOD = re.compile(
+    r"^(?P<count>\d+)\s*(?P<unit>mo|mon|month|months|q|quarter|quarters|y|yr|year|years)$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TrailTimePeriod:
+    """Parsed centroid trail period."""
+
+    duration_ms: int | None = None
+    frequency: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TrailBucket:
+    """Resolved trail bucket metadata for one timestamp."""
+
+    key: int | tuple[int, ...]
+    label: str
+    start_ms: int
+    end_ms: int
+
+
+def parse_centroid_time_period(value: str | None) -> TrailTimePeriod | None:
+    """Parse a user-friendly centroid trail period."""
+
+    if not value:
+        return None
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    if not normalized:
+        return None
+    normalized = CENTROID_TIME_ALIASES.get(normalized, normalized)
+    if match := WEEK_PERIOD.fullmatch(normalized):
+        count = int(match.group("count"))
+        prefix = "" if count == 1 else str(count)
+        return TrailTimePeriod(frequency=f"{prefix}W-SUN")
+    if match := CALENDAR_PERIOD.fullmatch(normalized):
+        count = int(match.group("count"))
+        prefix = "" if count == 1 else str(count)
+        return TrailTimePeriod(frequency=f"{prefix}{CALENDAR_PERIOD_UNITS[match.group('unit').lower()]}")
+    try:
+        duration = pd.Timedelta(normalized)
+    except ValueError as exc:
+        raise ValueError(
+            "Invalid --centroid-time-period. Examples: 1h, 2.5h, 2h 15min, daily, weekly, 30d, 2Q."
+        ) from exc
+    duration_ms = int(duration.value // 1_000_000)
+    if duration_ms <= 0:
+        raise ValueError("--centroid-time-period must be greater than zero.")
+    return TrailTimePeriod(duration_ms=duration_ms)
+
+
+def compute_centroid_trails(
+    rows: list[dict[str, object]],
+    cluster_labels: dict[int, str],
+    timeline_kind_value: str | None,
+    trail_columns: list[str] | None = None,
+    time_period: str | None = None,
+) -> dict[str, list[dict[str, object]]] | None:
+    """Compute centroid trails per group per time bucket.
+
+    Returns a dict keyed by trail column ("cluster", "category", etc.)
+    mapping to lists of trail objects. Returns *None* when timeline data
+    is missing or insufficient.
+    """
+
+    timed = [row for row in rows if row["timelineMs"] is not None]
+    if len(timed) < MIN_CENTROID_TRAIL_POINTS:
+        return None
+
+    period = parse_centroid_time_period(time_period)
+    result: dict[str, list[dict[str, object]]] = {}
+    for column in dict.fromkeys(trail_columns or []):
+        trails = _trails_for_group(
+            timed,
+            timeline_kind_value,
+            period,
+            group_fn=(
+                (lambda row: row["clusterId"])
+                if column == "cluster"
+                else (lambda row, current=column: _trail_group_value(row, current))
+            ),
+            label_fn=(
+                (lambda group_id: cluster_labels.get(int(group_id), str(group_id)))
+                if column == "cluster"
+                else str
+            ),
+        )
+        if trails:
+            result[column] = trails
+
+    return result or None
+
+
+def _trails_for_group(
+    timed_rows: list[dict[str, object]],
+    timeline_kind_value: str | None,
+    period: TrailTimePeriod | None,
+    group_fn,
+    label_fn,
+) -> list[dict[str, object]]:
+    """Build centroid trails for an arbitrary grouping function."""
+
+    buckets: dict[tuple[object, int | tuple[int, ...]], list[dict[str, object]]] = {}
+    bucket_info: dict[int | tuple[int, ...], TrailBucket] = {}
+    for row in timed_rows:
+        group_id = group_fn(row)
+        bucket = _trail_bucket(int(row["timelineMs"]), timeline_kind_value, period)
+        bucket_info[bucket.key] = bucket
+        buckets.setdefault((group_id, bucket.key), []).append(row)
+
+    trails: list[dict[str, object]] = []
+    for group_id in sorted({group_fn(row) for row in timed_rows}, key=str):
+        points = []
+        group_buckets = sorted(
+            (
+                (bucket_info[bucket_key], rows_for_bucket)
+                for (gid, bucket_key), rows_for_bucket in buckets.items()
+                if gid == group_id
+            ),
+            key=lambda item: item[0].start_ms,
+        )
+        for bucket, rows_for_bucket in group_buckets:
+            if len(rows_for_bucket) < MIN_CENTROID_BUCKET_SIZE:
+                continue
+            count = len(rows_for_bucket)
+            cx = sum(float(row["x"]) for row in rows_for_bucket) / count
+            cy = sum(float(row["y"]) for row in rows_for_bucket) / count
+            std = (
+                sum((float(row["x"]) - cx) ** 2 + (float(row["y"]) - cy) ** 2 for row in rows_for_bucket) / count
+            ) ** 0.5
+            points.append(
+                {
+                    "time": bucket.key,
+                    "timeLabel": bucket.label,
+                    "timeStartMs": bucket.start_ms,
+                    "timeEndMs": bucket.end_ms,
+                    "x": round(cx, 6),
+                    "y": round(cy, 6),
+                    "count": count,
+                    "std": round(std, 6),
+                }
+            )
+        if len(points) >= MIN_CENTROID_TRAIL_POINTS:
+            trails.append({"groupId": str(group_id), "groupLabel": label_fn(group_id), "points": points})
+    return trails
+
+
+def _trail_group_value(row: dict[str, object], column: str) -> str:
+    """Read one trail grouping value from the payload row."""
+
+    for field in ("colors", "filters", "raw"):
+        values = row.get(field)
+        if isinstance(values, dict) and column in values:
+            return str(values[column]).strip() or "(blank)"
+    return "(blank)"
+
+
+def _trail_bucket(ms: int, kind: str | None, period: TrailTimePeriod | None) -> TrailBucket:
+    """Build a serialized bucket for one trail timestamp."""
+
+    if period is None:
+        key = _time_bucket(ms, kind)
+        start_ms, end_ms = _default_bucket_bounds(ms, kind)
+        return TrailBucket(key=key, label=_bucket_label(key, kind), start_ms=start_ms, end_ms=end_ms)
+    if period.frequency:
+        timestamp = pd.Timestamp(ms, unit="ms", tz="UTC").tz_localize(None)
+        bucket = timestamp.to_period(period.frequency)
+        start = bucket.start_time.tz_localize("UTC")
+        end = bucket.end_time.tz_localize("UTC")
+        return TrailBucket(
+            key=int(start.value // 1_000_000),
+            label=_period_label(start, end),
+            start_ms=int(start.value // 1_000_000),
+            end_ms=int(end.value // 1_000_000),
+        )
+    assert period.duration_ms is not None
+    start_ms = (ms // period.duration_ms) * period.duration_ms
+    end_ms = start_ms + period.duration_ms - 1
+    start = pd.Timestamp(start_ms, unit="ms", tz="UTC")
+    end = pd.Timestamp(end_ms, unit="ms", tz="UTC")
+    return TrailBucket(
+        key=start_ms,
+        label=_period_label(start, end),
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+
+
+def _time_bucket(ms: int, kind: str | None) -> int | tuple[int, int] | tuple[int, int, int]:
+    """Map a UTC-ms timestamp to a discrete time bucket."""
+
+    dt = datetime.fromtimestamp(ms / 1000, tz=UTC)
+    if kind == "year":
+        return dt.year
+    if kind == "date":
+        return (dt.year, dt.month, dt.day)
+    return (dt.year, dt.month)
+
+
+def _default_bucket_bounds(ms: int, kind: str | None) -> tuple[int, int]:
+    """Return inclusive UTC-ms bounds for the default trail bucket."""
+
+    dt = datetime.fromtimestamp(ms / 1000, tz=UTC)
+    if kind == "year":
+        start = datetime(dt.year, 1, 1, tzinfo=UTC)
+        end = datetime(dt.year + 1, 1, 1, tzinfo=UTC)
+        return int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
+    if kind == "date":
+        start = datetime(dt.year, dt.month, dt.day, tzinfo=UTC)
+        end = start + pd.Timedelta(days=1).to_pytimedelta()
+        return int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
+    start = datetime(dt.year, dt.month, 1, tzinfo=UTC)
+    if dt.month == 12:
+        end = datetime(dt.year + 1, 1, 1, tzinfo=UTC)
+    else:
+        end = datetime(dt.year, dt.month + 1, 1, tzinfo=UTC)
+    return int(start.timestamp() * 1000), int(end.timestamp() * 1000) - 1
+
+
+def _bucket_label(bucket: int | tuple, kind: str | None) -> str:
+    """Human-readable label for a time bucket."""
+
+    if isinstance(bucket, tuple):
+        if len(bucket) == 3:
+            return f"{bucket[0]}-{bucket[1]:02d}-{bucket[2]:02d}"
+        return f"{bucket[0]}-{bucket[1]:02d}"
+    return str(bucket)
+
+
+def _period_label(start: pd.Timestamp, end: pd.Timestamp) -> str:
+    """Render a compact label for a custom trail period."""
+
+    if start.normalize() == start and end == (start + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)):
+        return start.strftime("%Y-%m-%d")
+    start_text = start.strftime("%Y-%m-%d %H:%M UTC")
+    end_text = end.strftime("%Y-%m-%d %H:%M UTC")
+    if start_text == end_text:
+        return start_text
+    return f"{start_text} to {end_text}"
+
+
 def build_payload(
     source: CsvSource,
     config: BuildConfig,
@@ -1392,8 +1671,11 @@ def build_payload(
 ) -> dict[str, object]:
     """Build the browser payload consumed by the standalone HTML."""
 
+    trail_columns = list(dict.fromkeys(config.centroid_trails))
     filter_columns = list(dict.fromkeys([*config.filter_columns, "cluster"]))
-    color_columns = list(dict.fromkeys([*config.color_columns, "cluster"]))
+    color_columns = list(
+        dict.fromkeys([*config.color_columns, *[column for column in trail_columns if column != "cluster"], "cluster"])
+    )
     sort_columns = ["_row_index", *([config.timeline_column] if config.timeline_column else []), *source.frame.columns.tolist()]
     sort_columns = list(dict.fromkeys(column for column in sort_columns if column))
 
@@ -1467,4 +1749,13 @@ def build_payload(
         "rows": rows,
         "xDomain": [round(float(min(x_values)), 6), round(float(max(x_values)), 6)],
         "yDomain": [round(float(min(y_values)), 6), round(float(max(y_values)), 6)],
+        "centroidTrails": compute_centroid_trails(
+            rows,
+            cluster_labels,
+            timeline_kind_value,
+            trail_columns,
+            config.centroid_time_period,
+        )
+        if trail_columns
+        else None,
     }
