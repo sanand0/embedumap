@@ -82,6 +82,7 @@ class BuildConfig:
     cluster_naming_model: str
     cluster_names: bool
     dimensions: int
+    max_image_size: int | None
     sample: int | None
     dry_run: bool
 
@@ -167,18 +168,24 @@ def load_csv_source(csv_input: str) -> CsvSource:
             response = client.get(csv_input)
             response.raise_for_status()
         frame = pd.read_csv(io.StringIO(response.text), dtype=str, keep_default_na=False).fillna("")
-        return CsvSource(label=str(response.url), frame=frame, csv_path=None, csv_url=str(response.url))
+        return CsvSource(
+            label=str(response.url), frame=frame, csv_path=None, csv_url=str(response.url)
+        )
 
     csv_path = Path(csv_input).expanduser().resolve()
     frame = pd.read_csv(csv_path, dtype=str, keep_default_na=False).fillna("")
     return CsvSource(label=str(csv_path), frame=frame, csv_path=csv_path, csv_url=None)
 
 
-def validate_columns(frame: pd.DataFrame, columns: list[str], *, allow_special: set[str] | None = None) -> None:
+def validate_columns(
+    frame: pd.DataFrame, columns: list[str], *, allow_special: set[str] | None = None
+) -> None:
     """Raise on missing columns while allowing explicit virtual names."""
 
     allow_special = allow_special or set()
-    missing = [column for column in columns if column not in allow_special and column not in frame.columns]
+    missing = [
+        column for column in columns if column not in allow_special and column not in frame.columns
+    ]
     if missing:
         sample = ", ".join(missing)
         raise ValueError(f"Unknown CSV column(s): {sample}")
@@ -198,7 +205,9 @@ def apply_sample(frame: pd.DataFrame, sample: int | None) -> pd.DataFrame:
 def row_text_payload(row: pd.Series, columns: list[str]) -> str:
     """Build the merged text payload for one row."""
 
-    parts = [f"{column}: {str(row[column]).strip()}" for column in columns if str(row[column]).strip()]
+    parts = [
+        f"{column}: {str(row[column]).strip()}" for column in columns if str(row[column]).strip()
+    ]
     return "\n\n".join(parts)
 
 
@@ -294,7 +303,11 @@ def timeline_kind(frame: pd.DataFrame, timeline_column: str | None) -> str | Non
 def format_timeline_text(timestamp: pd.Timestamp, kind: str | None) -> str:
     """Render a compact, UI-friendly timeline label."""
 
-    as_utc = timestamp.tz_convert("UTC") if timestamp.tzinfo is not None else timestamp.tz_localize("UTC")
+    as_utc = (
+        timestamp.tz_convert("UTC")
+        if timestamp.tzinfo is not None
+        else timestamp.tz_localize("UTC")
+    )
     if kind == "year":
         return as_utc.strftime("%Y")
     if kind == "date":
@@ -325,7 +338,9 @@ def default_label(
     return f"Row {int(row['_row_index']) + 1}"
 
 
-def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord], dict[str, object]]:
+def prepare_rows(
+    source: CsvSource, config: BuildConfig
+) -> tuple[list[RowRecord], dict[str, object]]:
     """Normalize rows, resolve labels, and collect image references."""
 
     frame = apply_sample(source.frame, config.sample)
@@ -337,7 +352,11 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
         + config.audio_metadata_columns,
     )
     validate_columns(frame, config.color_columns + config.filter_columns + config.label_columns)
-    validate_columns(frame, [value for value in config.cluster_columns if value != "embeddings"], allow_special={"embeddings"})
+    validate_columns(
+        frame,
+        [value for value in config.cluster_columns if value != "embeddings"],
+        allow_special={"embeddings"},
+    )
     if config.timeline_column:
         validate_columns(frame, [config.timeline_column])
 
@@ -352,7 +371,9 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
 
     for idx, row in frame.iterrows():
         raw = {column: str(row[column]) for column in source.frame.columns}
-        tooltip = {column: truncate(raw[column], MAX_TOOLTIP_CHARS) for column in source.frame.columns}
+        tooltip = {
+            column: truncate(raw[column], MAX_TOOLTIP_CHARS) for column in source.frame.columns
+        }
         text_payload = row_text_payload(row, config.embedding_columns)
         images = [
             resolved
@@ -367,20 +388,34 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
         audio_metadata_text = (
             row_text_payload(
                 row,
-                [column for column in config.audio_metadata_columns if column not in config.embedding_columns],
+                [
+                    column
+                    for column in config.audio_metadata_columns
+                    if column not in config.embedding_columns
+                ],
             )
             if audios
             else ""
         )
         if images:
             remote_image_rows += sum(image.remote_url is not None for image in images)
-            missing_local_images += sum(image.local_path is not None and not image.exists for image in images)
+            missing_local_images += sum(
+                image.local_path is not None and not image.exists for image in images
+            )
         if audios:
             remote_audio_rows += sum(audio.remote_url is not None for audio in audios)
-            missing_local_audios += sum(audio.local_path is not None and not audio.exists for audio in audios)
+            missing_local_audios += sum(
+                audio.local_path is not None and not audio.exists for audio in audios
+            )
         label = truncate(
-            " | ".join(str(row[column]).strip() for column in config.label_columns if str(row[column]).strip())
-            or default_label(row, config.embedding_columns, config.image_columns, config.audio_columns),
+            " | ".join(
+                str(row[column]).strip()
+                for column in config.label_columns
+                if str(row[column]).strip()
+            )
+            or default_label(
+                row, config.embedding_columns, config.image_columns, config.audio_columns
+            ),
             MAX_LABEL_CHARS,
         )
         timeline_text = None
@@ -411,7 +446,11 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
             )
         )
 
-    timeline_non_empty = int(frame[config.timeline_column].astype(str).str.strip().ne("").sum()) if config.timeline_column else 0
+    timeline_non_empty = (
+        int(frame[config.timeline_column].astype(str).str.strip().ne("").sum())
+        if config.timeline_column
+        else 0
+    )
     timeline_valid = int(parsed_timeline.notna().sum()) if parsed_timeline is not None else 0
     report = {
         "source": source.label,
@@ -430,12 +469,20 @@ def prepare_rows(source: CsvSource, config: BuildConfig) -> tuple[list[RowRecord
     return records, report
 
 
-def dry_run_report(source: CsvSource, config: BuildConfig, records: list[RowRecord], report: dict[str, object]) -> None:
+def dry_run_report(
+    source: CsvSource, config: BuildConfig, records: list[RowRecord], report: dict[str, object]
+) -> None:
     """Print a compact dry-run summary."""
 
     frame = report["frame"]
-    color_counts = {column: int(frame[column].astype(str).fillna("").nunique(dropna=False)) for column in config.color_columns}
-    filter_counts = {column: int(frame[column].astype(str).fillna("").nunique(dropna=False)) for column in config.filter_columns}
+    color_counts = {
+        column: int(frame[column].astype(str).fillna("").nunique(dropna=False))
+        for column in config.color_columns
+    }
+    filter_counts = {
+        column: int(frame[column].astype(str).fillna("").nunique(dropna=False))
+        for column in config.filter_columns
+    }
     cluster_mode = "kmeans" if "embeddings" in config.cluster_columns else "direct-label"
     console.print(f"Source: {report['source']}")
     console.print(
@@ -443,6 +490,7 @@ def dry_run_report(source: CsvSource, config: BuildConfig, records: list[RowReco
     )
     console.print(f"Embedding columns: {config.embedding_columns or ['(none)']}")
     console.print(f"Image columns: {config.image_columns or ['(none)']}")
+    console.print(f"Max image size: {config.max_image_size or '(original)'}")
     console.print(f"Audio columns: {config.audio_columns or ['(none)']}")
     console.print(f"Audio metadata columns: {config.audio_metadata_columns or ['(none)']}")
     console.print(f"Color columns: {config.color_columns or ['(cluster only)']}")
@@ -452,8 +500,12 @@ def dry_run_report(source: CsvSource, config: BuildConfig, records: list[RowReco
     console.print(f"Branding: {config.branding}")
     console.print(f"Opacity: {config.opacity}")
     console.print(f"Bar chart corner: {config.bar_chart_corner}")
-    console.print(f"Axis labels: {'enabled' if config.axis_labels else 'disabled'} ({config.cluster_naming_model})")
-    console.print(f"Cluster naming: {'enabled' if config.cluster_names else 'disabled'} ({config.cluster_naming_model})")
+    console.print(
+        f"Axis labels: {'enabled' if config.axis_labels else 'disabled'} ({config.cluster_naming_model})"
+    )
+    console.print(
+        f"Cluster naming: {'enabled' if config.cluster_names else 'disabled'} ({config.cluster_naming_model})"
+    )
     if config.timeline_column:
         console.print(
             f"Timeline: {config.timeline_column} ({report['timeline_kind'] or 'unknown'}, {report['timeline_valid']}/{report['timeline_non_empty']} parseable)"
@@ -474,7 +526,7 @@ def dry_run_report(source: CsvSource, config: BuildConfig, records: list[RowReco
     console.print(f"Output: {config.output_path}")
 
 
-def media_bytes(media: MediaInput) -> tuple[bytes, str]:
+def media_bytes(media: MediaInput, max_image_size: int | None) -> tuple[bytes, str]:
     """Fetch one media payload and mime type for Gemini embedding."""
 
     if media.local_path:
@@ -482,30 +534,46 @@ def media_bytes(media: MediaInput) -> tuple[bytes, str]:
             raise FileNotFoundError(f"Missing {media.kind} file: {media.local_path}")
         mime_type = mimetypes.guess_type(media.local_path.name)[0] or "application/octet-stream"
         data = media.local_path.read_bytes()
-        return normalized_image_bytes(data, mime_type) if media.kind == "image" else (data, mime_type)
+        return (
+            normalized_image_bytes(data, mime_type, max_image_size)
+            if media.kind == "image"
+            else (data, mime_type)
+        )
 
     if not media.remote_url:
         raise FileNotFoundError(f"Could not resolve {media.kind} reference: {media.raw_value}")
     with httpx.Client(follow_redirects=True, timeout=60) as client:
         response = client.get(media.remote_url)
         response.raise_for_status()
-    mime_type = response.headers.get("content-type", "").split(";")[0] or mimetypes.guess_type(media.remote_url)[0] or "application/octet-stream"
-    return normalized_image_bytes(response.content, mime_type) if media.kind == "image" else (response.content, mime_type)
+    mime_type = (
+        response.headers.get("content-type", "").split(";")[0]
+        or mimetypes.guess_type(media.remote_url)[0]
+        or "application/octet-stream"
+    )
+    return (
+        normalized_image_bytes(response.content, mime_type, max_image_size)
+        if media.kind == "image"
+        else (response.content, mime_type)
+    )
 
 
-def normalized_image_bytes(data: bytes, mime_type: str) -> tuple[bytes, str]:
+def normalized_image_bytes(
+    data: bytes, mime_type: str, max_image_size: int | None = None
+) -> tuple[bytes, str]:
     """Convert image inputs into a Gemini-friendly PNG payload."""
 
     if not mime_type.startswith("image/"):
         return data, mime_type
     with Image.open(io.BytesIO(data)) as image:
         converted = image.convert("RGBA") if "A" in image.getbands() else image.convert("RGB")
+        if max_image_size:
+            converted.thumbnail((max_image_size, max_image_size), Image.Resampling.LANCZOS)
         buffer = io.BytesIO()
         converted.save(buffer, format="PNG")
         return buffer.getvalue(), "image/png"
 
 
-def build_content(record: RowRecord) -> types.Content:
+def build_content(record: RowRecord, max_image_size: int | None) -> types.Content:
     """Create one Gemini content payload for a row."""
 
     parts: list[types.Part] = []
@@ -514,10 +582,10 @@ def build_content(record: RowRecord) -> types.Content:
     if record.audio_metadata_text:
         parts.append(types.Part.from_text(text=f"Audio metadata:\n{record.audio_metadata_text}"))
     for image in record.images:
-        data, mime_type = media_bytes(image)
+        data, mime_type = media_bytes(image, max_image_size)
         parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
     for audio in record.audios:
-        data, mime_type = media_bytes(audio)
+        data, mime_type = media_bytes(audio, max_image_size)
         parts.append(types.Part.from_bytes(data=data, mime_type=mime_type))
     if not parts:
         raise ValueError(f"Row {record.row_index} has no embeddable content")
@@ -621,10 +689,17 @@ def record_content_hash(record: RowRecord) -> str:
     return sha256(stable_json(payload).encode("utf-8")).hexdigest()
 
 
-def record_cache_key(source: CsvSource, record: RowRecord, model: str, dimensions: int) -> tuple[str, str]:
+def record_cache_key(
+    source: CsvSource,
+    record: RowRecord,
+    model: str,
+    dimensions: int,
+    max_image_size: int | None,
+) -> tuple[str, str]:
     """Return the cache key plus the underlying content hash for one row."""
 
     content_hash = record_content_hash(record)
+    effective_max_image_size = max_image_size if record.images else None
     payload = {
         "version": EMBEDDING_CACHE_VERSION,
         "source": source.label,
@@ -632,6 +707,7 @@ def record_cache_key(source: CsvSource, record: RowRecord, model: str, dimension
         "content_hash": content_hash,
         "model": model,
         "dimensions": dimensions,
+        "max_image_size": effective_max_image_size,
     }
     return sha256(stable_json(payload).encode("utf-8")).hexdigest(), content_hash
 
@@ -713,7 +789,10 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
     """Embed all prepared rows with cache reuse, retries, and bounded batching."""
 
     cache_path = default_cache_path(config.output_path)
-    cache_entries = [record_cache_key(source, record, config.model, config.dimensions) for record in records]
+    cache_entries = [
+        record_cache_key(source, record, config.model, config.dimensions, config.max_image_size)
+        for record in records
+    ]
     cache_keys = [cache_key for cache_key, _ in cache_entries]
     with with_cache(cache_path) as connection:
         cached = cached_vectors(connection, cache_keys, config.dimensions)
@@ -725,7 +804,9 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
             vectors[idx] = cached[cache_key]
 
     if not missing_indices:
-        console.print(f"Embedding cache hit: reused {len(records)} of {len(records)} rows from {cache_path}")
+        console.print(
+            f"Embedding cache hit: reused {len(records)} of {len(records)} rows from {cache_path}"
+        )
         return vectors
 
     client = gemini_client()
@@ -738,7 +819,7 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
         batch = [records[idx] for idx in batch_indices]
         batch_range = f"{batch_indices[0] + 1}-{batch_indices[-1] + 1}"
         console.print(f"Embedding uncached rows {batch_range} of {len(records)}...")
-        contents = [build_content(record) for record in batch]
+        contents = [build_content(record, config.max_image_size) for record in batch]
         delay = 4
         for attempt in range(6):
             try:
@@ -832,7 +913,9 @@ def reorder_labels(raw_labels: np.ndarray) -> tuple[np.ndarray, dict[int, int]]:
     return mapped, mapping
 
 
-def direct_cluster_labels(records: list[RowRecord], columns: list[str]) -> tuple[np.ndarray, dict[int, str]]:
+def direct_cluster_labels(
+    records: list[RowRecord], columns: list[str]
+) -> tuple[np.ndarray, dict[int, str]]:
     """Use one or more CSV columns directly as cluster labels."""
 
     labels = []
@@ -858,7 +941,9 @@ def kmeans_clusters(
 
     blocks: list[np.ndarray] = []
     if "embeddings" in columns or not columns:
-        embed_components = min(32, len(vectors) - 1, vectors.shape[1]) if len(vectors) > 2 else vectors.shape[1]
+        embed_components = (
+            min(32, len(vectors) - 1, vectors.shape[1]) if len(vectors) > 2 else vectors.shape[1]
+        )
         if embed_components and embed_components < vectors.shape[1]:
             pca = PCA(n_components=embed_components, random_state=42)
             embed_block = pca.fit_transform(vectors).astype(np.float32)
@@ -869,7 +954,9 @@ def kmeans_clusters(
     meta_columns = [column for column in columns if column != "embeddings"]
     if meta_columns:
         encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False, dtype=np.float32)
-        encoded = encoder.fit_transform([[record.raw[column] for column in meta_columns] for record in records])
+        encoded = encoder.fit_transform(
+            [[record.raw[column] for column in meta_columns] for record in records]
+        )
         blocks.append(0.45 * normalize_vectors(encoded))
 
     feature_matrix = np.hstack(blocks) if len(blocks) > 1 else blocks[0]
@@ -897,7 +984,9 @@ def representative_row_payload(record: RowRecord) -> dict[str, object]:
     return {
         "row_index": record.row_index,
         "label": record.label,
-        "text_excerpt": truncate(record.text_payload.replace("\n\n", " | "), 220) if record.text_payload else "",
+        "text_excerpt": truncate(record.text_payload.replace("\n\n", " | "), 220)
+        if record.text_payload
+        else "",
         "summary": " | ".join(summary_fields),
         "timeline": record.timeline_text or "",
     }
@@ -949,7 +1038,9 @@ def salient_cluster_values(
         if unique_count > min(8, max(3, len(cluster_rows) // 2)):
             continue
         top_values = counts.most_common(2)
-        rendered = ", ".join(f"{value} ({count}/{len(cluster_rows)})" for value, count in top_values)
+        rendered = ", ".join(
+            f"{value} ({count}/{len(cluster_rows)})" for value, count in top_values
+        )
         summaries.append((top_values[0][1], f"{column}: {rendered}"))
     summaries.sort(reverse=True)
     return [summary for _, summary in summaries[:3]]
@@ -967,7 +1058,11 @@ def naming_context(
 
     centroids = cluster_centroids(vectors, cluster_ids)
     centroid_matrix = np.vstack([centroids[cluster_id] for cluster_id in sorted(centroids)])
-    similarity_matrix = centroid_matrix @ centroid_matrix.T if len(centroid_matrix) > 1 else np.ones((1, 1), dtype=np.float32)
+    similarity_matrix = (
+        centroid_matrix @ centroid_matrix.T
+        if len(centroid_matrix) > 1
+        else np.ones((1, 1), dtype=np.float32)
+    )
     cluster_order = sorted(centroids)
     cluster_columns = cluster_context_columns(config, source.frame)
     contexts: list[dict[str, object]] = []
@@ -976,9 +1071,9 @@ def naming_context(
         scores = vectors[cluster_indices] @ centroids[cluster_id]
         top_local = cluster_indices[np.argsort(-scores)[:CLUSTER_NAMING_TOP_N]]
         neighbor_positions = np.argsort(-similarity_matrix[position]).tolist()
-        contrast_clusters = [cluster_order[idx] for idx in neighbor_positions if cluster_order[idx] != cluster_id][
-            :CLUSTER_NAMING_NEIGHBORS
-        ]
+        contrast_clusters = [
+            cluster_order[idx] for idx in neighbor_positions if cluster_order[idx] != cluster_id
+        ][:CLUSTER_NAMING_NEIGHBORS]
         nearby = []
         for other_cluster_id in contrast_clusters:
             other_indices = np.where(cluster_ids == other_cluster_id)[0]
@@ -988,7 +1083,10 @@ def naming_context(
                 {
                     "cluster_id": other_cluster_id,
                     "label": cluster_labels[other_cluster_id],
-                    "rows": [representative_row_payload(records[int(index)]) for index in top_other.tolist()],
+                    "rows": [
+                        representative_row_payload(records[int(index)])
+                        for index in top_other.tolist()
+                    ],
                 }
             )
         contexts.append(
@@ -997,7 +1095,9 @@ def naming_context(
                 "current_label": cluster_labels[cluster_id],
                 "size": int(len(cluster_indices)),
                 "salient_values": salient_cluster_values(records, cluster_indices, cluster_columns),
-                "rows": [representative_row_payload(records[int(index)]) for index in top_local.tolist()],
+                "rows": [
+                    representative_row_payload(records[int(index)]) for index in top_local.tolist()
+                ],
                 "nearby_clusters": nearby,
             }
         )
@@ -1103,11 +1203,15 @@ def axis_label_context(
     top_n = min(AXIS_LABEL_TOP_N, len(records))
     return {
         "source": Path(source.label).name,
-        "x_low": axis_side_payload(records, coords, cluster_ids, cluster_labels, x_order[:top_n], context_columns),
+        "x_low": axis_side_payload(
+            records, coords, cluster_ids, cluster_labels, x_order[:top_n], context_columns
+        ),
         "x_high": axis_side_payload(
             records, coords, cluster_ids, cluster_labels, x_order[::-1][:top_n], context_columns
         ),
-        "y_low": axis_side_payload(records, coords, cluster_ids, cluster_labels, y_order[:top_n], context_columns),
+        "y_low": axis_side_payload(
+            records, coords, cluster_ids, cluster_labels, y_order[:top_n], context_columns
+        ),
         "y_high": axis_side_payload(
             records, coords, cluster_ids, cluster_labels, y_order[::-1][:top_n], context_columns
         ),
@@ -1249,7 +1353,9 @@ def maybe_name_clusters(
     delay = 4
     for attempt in range(6):
         try:
-            text = generate_structured_content_once(client, config.cluster_naming_model, prompt, schema)
+            text = generate_structured_content_once(
+                client, config.cluster_naming_model, prompt, schema
+            )
             break
         except genai_errors.ClientError as exc:
             message = str(exc)
@@ -1259,7 +1365,9 @@ def maybe_name_clusters(
             if attempt == 5:
                 console.print(f"Cluster naming failed: {exc}. Keeping base labels.")
                 return cluster_labels
-            console.print(f"Cluster naming rate limited. Sleeping {delay}s before retry {attempt + 1}/6.")
+            console.print(
+                f"Cluster naming rate limited. Sleeping {delay}s before retry {attempt + 1}/6."
+            )
             import time
 
             time.sleep(delay)
@@ -1331,7 +1439,9 @@ def maybe_label_axes(
     delay = 4
     for attempt in range(6):
         try:
-            text = generate_structured_content_once(client, config.cluster_naming_model, prompt, schema)
+            text = generate_structured_content_once(
+                client, config.cluster_naming_model, prompt, schema
+            )
             break
         except genai_errors.ClientError as exc:
             message = str(exc)
@@ -1341,7 +1451,9 @@ def maybe_label_axes(
             if attempt == 5:
                 console.print(f"Axis labeling failed: {exc}. Keeping fallback labels.")
                 return fallback
-            console.print(f"Axis labeling rate limited. Sleeping {delay}s before retry {attempt + 1}/6.")
+            console.print(
+                f"Axis labeling rate limited. Sleeping {delay}s before retry {attempt + 1}/6."
+            )
             import time
 
             time.sleep(delay)
@@ -1375,7 +1487,9 @@ def analyze_records(
         cluster_ids, cluster_labels = kmeans_clusters(records, vectors, config.cluster_columns)
     else:
         cluster_ids, cluster_labels = direct_cluster_labels(records, config.cluster_columns)
-    cluster_labels = maybe_name_clusters(source, records, vectors, cluster_ids, cluster_labels, config)
+    cluster_labels = maybe_name_clusters(
+        source, records, vectors, cluster_ids, cluster_labels, config
+    )
     axis_labels = maybe_label_axes(source, records, coords, cluster_ids, cluster_labels, config)
     return coords, cluster_ids, cluster_labels, axis_labels
 
@@ -1394,7 +1508,11 @@ def build_payload(
 
     filter_columns = list(dict.fromkeys([*config.filter_columns, "cluster"]))
     color_columns = list(dict.fromkeys([*config.color_columns, "cluster"]))
-    sort_columns = ["_row_index", *([config.timeline_column] if config.timeline_column else []), *source.frame.columns.tolist()]
+    sort_columns = [
+        "_row_index",
+        *([config.timeline_column] if config.timeline_column else []),
+        *source.frame.columns.tolist(),
+    ]
     sort_columns = list(dict.fromkeys(column for column in sort_columns if column))
 
     rows: list[dict[str, object]] = []
@@ -1423,11 +1541,17 @@ def build_payload(
             "raw": record.raw,
             "tooltip": record.tooltip,
             "colors": {
-                **{column: record.raw[column].strip() or "(blank)" for column in config.color_columns},
+                **{
+                    column: record.raw[column].strip() or "(blank)"
+                    for column in config.color_columns
+                },
                 "cluster": cluster_label,
             },
             "filters": {
-                **{column: record.raw[column].strip() or "(blank)" for column in config.filter_columns},
+                **{
+                    column: record.raw[column].strip() or "(blank)"
+                    for column in config.filter_columns
+                },
                 "cluster": cluster_label,
             },
         }
@@ -1457,11 +1581,17 @@ def build_payload(
         "sortColumns": sort_columns,
         "defaultSort": config.timeline_column or "_row_index",
         "timelineColumn": config.timeline_column,
-        "timelineKind": timeline_kind_value if timeline_kind_value is not None else timeline_kind(source.frame, config.timeline_column),
+        "timelineKind": timeline_kind_value
+        if timeline_kind_value is not None
+        else timeline_kind(source.frame, config.timeline_column),
         "timelineMin": min(timeline_values) if timeline_values else None,
         "timelineMax": max(timeline_values) if timeline_values else None,
         "clusters": [
-            {"id": cluster_id, "label": cluster_labels[cluster_id], "count": cluster_counts[cluster_id]}
+            {
+                "id": cluster_id,
+                "label": cluster_labels[cluster_id],
+                "count": cluster_counts[cluster_id],
+            }
             for cluster_id in sorted(cluster_labels)
         ],
         "rows": rows,

@@ -61,6 +61,7 @@ Build an image-first map:
 ```bash
 uv run embedumap samples/calvin-images.csv \
   --image-columns file \
+  --max-image-size 768 \
   --timeline-column date \
   --popup-style grid
 ```
@@ -88,6 +89,7 @@ uvx --from "git+https://github.com/sanand0/embedumap.git@main" embedumap https:/
 - `--branding` controls the top-left page label, and `--opacity` sets the base point opacity.
 - `--bar-chart-corner` moves the overlay bar chart between `top-left`, `top-right`, `bottom-left`, and `bottom-right`.
 - Axis labels are interpreted by Gemini by default using `--cluster-naming-model`; use `--no-axis-labels` to keep `UMAP 1` and `UMAP 2`.
+- `--max-image-size N` resizes embedded image payloads to fit inside an `N` by `N` tile without changing aspect ratio. There is no default resize; use `768` to match the Gemini embedding models' tile size.
 - Embeddings are cached by default in `embedumap.duckdb` next to the output HTML.
 - `--cluster-names` adds a lightweight Gemini naming pass after deterministic clustering.
 - The pipeline still stays intentionally small: no thumbnails, no sidecar JSON, no transcription pipeline.

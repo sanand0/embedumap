@@ -43,25 +43,39 @@ def normalize_bar_chart_corner(value: str) -> str:
 
     corner = value.strip().lower()
     if corner not in {"top-left", "top-right", "bottom-left", "bottom-right"}:
-        raise typer.BadParameter("Bar chart corner must be one of: top-left, top-right, bottom-left, bottom-right")
+        raise typer.BadParameter(
+            "Bar chart corner must be one of: top-left, top-right, bottom-left, bottom-right"
+        )
     return corner
 
 
 @app.command()
 def run(
     csv_input: str = typer.Argument(..., help="Local CSV path or HTTP(S) URL."),
-    embedding_columns_raw: list[str] = typer.Option([], "--embedding-columns", help="Text columns to embed."),
-    image_columns_raw: list[str] = typer.Option([], "--image-columns", help="Image URL/path columns to embed."),
-    audio_columns_raw: list[str] = typer.Option([], "--audio-columns", help="Audio URL/path columns to embed."),
+    embedding_columns_raw: list[str] = typer.Option(
+        [], "--embedding-columns", help="Text columns to embed."
+    ),
+    image_columns_raw: list[str] = typer.Option(
+        [], "--image-columns", help="Image URL/path columns to embed."
+    ),
+    audio_columns_raw: list[str] = typer.Option(
+        [], "--audio-columns", help="Audio URL/path columns to embed."
+    ),
     audio_metadata_columns_raw: list[str] = typer.Option(
         [],
         "--audio-metadata-columns",
         help="Optional text columns to include alongside audio embeddings.",
     ),
-    color_columns_raw: list[str] = typer.Option([], "--color-columns", help="Columns available for point colors."),
-    filter_columns_raw: list[str] = typer.Option([], "--filter-columns", help="Columns exposed as filters."),
+    color_columns_raw: list[str] = typer.Option(
+        [], "--color-columns", help="Columns available for point colors."
+    ),
+    filter_columns_raw: list[str] = typer.Option(
+        [], "--filter-columns", help="Columns exposed as filters."
+    ),
     timeline_column: str | None = typer.Option(None, "--timeline-column", help="Timeline column."),
-    branding: str = typer.Option("embedumap", "--branding", help="Brand shown at the top left of the page."),
+    branding: str = typer.Option(
+        "embedumap", "--branding", help="Brand shown at the top left of the page."
+    ),
     opacity: float = typer.Option(1.0, "--opacity", min=0.0, max=1.0, help="Base point opacity."),
     bar_chart_corner: str = typer.Option(
         "top-right",
@@ -84,18 +98,36 @@ def run(
         "--label-columns",
         help="Columns used to build the primary hover label.",
     ),
-    popup_style: str = typer.Option("table", "--popup-style", help="Popup layout: table, grid, or list."),
+    popup_style: str = typer.Option(
+        "table", "--popup-style", help="Popup layout: table, grid, or list."
+    ),
     model: str = typer.Option(DEFAULT_MODEL, "--model", help="Gemini embedding model."),
-    cluster_names: bool = typer.Option(False, "--cluster-names", help="Ask Gemini to generate short cluster names."),
+    cluster_names: bool = typer.Option(
+        False, "--cluster-names", help="Ask Gemini to generate short cluster names."
+    ),
     cluster_naming_model: str = typer.Option(
         DEFAULT_CLUSTER_NAMING_MODEL,
         "--cluster-naming-model",
         help="Gemini model used for cluster naming and axis interpretation.",
     ),
-    dimensions: int = typer.Option(DEFAULT_DIMENSIONS, "--dimensions", min=128, help="Embedding dimensionality."),
-    sample: int | None = typer.Option(None, "--sample", min=1, help="Sample N rows before building."),
-    output_path: Path = typer.Option(Path("index.html"), "--output", help="Where to write the HTML output."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Validate inputs without embedding or writing HTML."),
+    dimensions: int = typer.Option(
+        DEFAULT_DIMENSIONS, "--dimensions", min=128, help="Embedding dimensionality."
+    ),
+    max_image_size: int | None = typer.Option(
+        None,
+        "--max-image-size",
+        min=1,
+        help="Resize embedded images to fit inside an NxN tile while preserving aspect ratio.",
+    ),
+    sample: int | None = typer.Option(
+        None, "--sample", min=1, help="Sample N rows before building."
+    ),
+    output_path: Path = typer.Option(
+        Path("index.html"), "--output", help="Where to write the HTML output."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Validate inputs without embedding or writing HTML."
+    ),
 ) -> None:
     """Build the map or validate the plan for it."""
 
@@ -122,6 +154,7 @@ def run(
         cluster_naming_model=cluster_naming_model.strip(),
         cluster_names=cluster_names,
         dimensions=dimensions,
+        max_image_size=max_image_size,
         sample=sample,
         dry_run=dry_run,
     )
