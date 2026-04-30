@@ -1,5 +1,112 @@
 # Prompts
 
+## Further UI changes, 27 Apr 2026
+
+<!--
+
+cd /home/sanand/code/embedumap
+dev.sh \
+  -v /home/sanand/Downloads/csv-visualisation/:/home/sanand/Downloads/csv-visualisation/:ro \
+  -v /home/sanand/Downloads/chart-map:/home/sanand/Downloads/chart-map:ro \
+  -v /home/sanand/code/blog/analysis/embeddings/:/home/sanand/code/blog/analysis/embeddings/:ro \
+  -v /home/sanand/code/calvinmap/:/home/sanand/code/calvinmap/:ro
+codex --yolo --model gpt-5.5 --config model_reasoning_effort=medium
+
+-->
+
+In .timeline-bar:
+
+- Make Cumulative a toggle, eliminating "Moving window"
+- Drop the "Playback" label
+- Make the entire bar a single-line responsive flex
+- Include an opacity slider that controls the opacity of the unselected nodes and trails
+
+Commit as you go.
+
+---
+
+More UI changes:
+
+- For images, use lazy loading.
+- Change the opacity slider so that there is a lot of granularity at the lower end so that it feels visually and perceptually smooth as you slide. Ensure that 0 opacity is possible.
+- By default, turn Trails off in the UI.
+- For .timeline-duration set the top to -10px instead of -18px.
+
+---
+
+Modify the opacity slider so that there are only 100 steps. Show the opacity to 2 significant digits.
+Make buttons (.button-group button, select, .toolbar button, #timeline-play, #timeline-cumulative, .popup-close) smaller and size them like labels -- just these 2 changes: font-size of 0.68rem; text-transform: uppercase.
+Add a compact search-as-you-type filter in #controls - with padding / size similar tothe buttons.
+
+In README.md document how the embedding cache key is constructed and how to regenerate using existing embeddings.
+
+## Update with trails, 26 Apr 2026
+
+<!--
+
+cd /home/sanand/code/embedumap
+dev.sh \
+  -v /home/sanand/Downloads/csv-visualisation/:/home/sanand/Downloads/csv-visualisation/:ro \
+  -v /home/sanand/Downloads/chart-map:/home/sanand/Downloads/chart-map:ro \
+  -v /home/sanand/code/blog/analysis/embeddings/:/home/sanand/code/blog/analysis/embeddings/:ro \
+  -v /home/sanand/code/calvinmap/:/home/sanand/code/calvinmap/:ro
+codex --yolo --model gpt-5.5 --config model_reasoning_effort=xhigh
+
+-->
+
+The fork https://github.com/ritesh17rb/embedumap has additional features that I want to incorporate, specifically:
+
+- The trails feature
+- The speed and playback controls
+
+However, there are some aspects of this implementation I'm not happy about from a usability and UX perspective. I'm also not happy with the code quality.
+
+Review the forked implementation, understand how it works, and create a plan to incorporate the features I want.
+
+Create a trails-plan.md that document the changes you would make to improve the usability and UX, and also the code quality and includes any questions you have about the implementation or the features before you start coding.
+
+Await my inputs before you start coding.
+
+---
+
+Here are my inputs:
+
+1. Use `--trails` instead of `--centroid-trails` with docs explaining that the visual path is made from time-bucket centroids.
+2. Let trails default to `cluster` when `--centroid-trails` is provided without values.
+3. Let trail grouping follow the active color dimension by default.
+4. Let `cluster` trails be included automatically whenever trails are requested?
+5. Use bucket defaults of yearly, monthly, daily, hourly, minutely for datetime timelines?
+6. Use your judgement on buckets with only one row
+7. The spread metric is useful in the UI with blur as a visual encoding. Retain that.
+8. Persist the playback mode in the URL including the speed.
+9. No `Off` mode is required for trails, `Nodes only` is enough.
+10. Don't compact the top-control. Limit to trails and timeline playback. But ensure that the top-control is responsive.
+
+Implement elegantly and minimally. Use sub-agents as required.
+Write tests first. Then validate.
+Use agent-browser and/or playwright to test samples visually, too.
+Commit as you go.
+
+---
+
+Modify the script to allow a larger (customizable) batch sizes to speed up the embedding process.
+
+Create a `trails` branch on top of the `images` branch. Squash and merge the changes in this (paths) branch into that so that it has a two commits above `main` -- the existing `images` branch commit and a new one for the `trails` feature you just implemented. We will merge this `trails` branch into `main` so that `main` will move forward by 2 comments.
+
+---
+
+Here are some more UI changes.
+
+- Drop the Lines + Nodes | Lines | Nodes toggle. Just have a Trails button toggle. Nodes will be visible and the trails alone will toggle.
+- For the nodes that are deselected due to the time range selection, reduce their opacity to the same as the opacity of nodes deselected due to filters. Add a command line option to customize this this opacity.
+- Use the same opacity for the trails. Add a command line option to customize this opacity independently.
+- For deselected nodes - either due to time range selection or filters - do not allow any mouse interactions: no hover, no brush, no click. Currently, even when I filter by a cluster, I see popups for nodes in other clusters when I hover over them.
+- Restore the speed slider - rather than the 0.5x, 1x, 2x, ... buttons. Use a logarithmic slider with a range that will play the entire timeline in 10 min (slowest) to 1 second (fastest). The default should be 30 seconds.
+
+<!-- codex resume 019dca8f-6d10-78a2-b172-16c04182b653 --yolo -->
+
+## Generate embeddings UMAP
+
 <!--
 
 cd /home/sanand/code/embedumap
@@ -173,3 +280,19 @@ As the number of digits in the bars increase, the bars shift left. Avoid that. O
 Use a Gemini API call to the same model used for cluster naming to interpret the axes intuitively instead of calling them UMAP 1 and UMAP 2 in the generated HTML. Call this by default, but add a CLI option to turn it off if needed.
 
 <!-- codex --yolo --model gpt-5.4 --config model_reasoning_effort=xhigh resume 019d3df6-1192-7b01-be69-3b5f2a092a92 -->
+
+## Enhancements 2, 23 Apr 2026
+
+<!--
+
+cd /home/sanand/code/embedumap
+dev.sh
+codex --yolo --model gpt-5.5 --config model_reasoning_effort=high
+
+-->
+
+Add an option to specify the maximum size of images. For example, specifying 768 would resize the images to fit inside a 768x768 tile without distorting the aspect ratio. Do not include a default, but document 768 as the Gemini embedding models tile size.
+
+Test efficiently. Commit as you go.
+
+<!-- codex resume 019dbd37-17d9-7db2-896d-aac62100d0c1 --yolo -->

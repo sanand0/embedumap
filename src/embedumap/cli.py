@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import typer
@@ -10,6 +11,7 @@ from rich.traceback import install
 
 from .core import (
     BuildConfig,
+    DEFAULT_BATCH_SIZE,
     DEFAULT_CLUSTER_NAMING_MODEL,
     DEFAULT_DIMENSIONS,
     DEFAULT_MODEL,
@@ -17,6 +19,7 @@ from .core import (
     build_payload,
     dry_run_report,
     load_csv_source,
+    parse_trail_period,
     prepare_rows,
     split_option_values,
 )
@@ -49,6 +52,20 @@ def normalize_bar_chart_corner(value: str) -> str:
     return corner
 
 
+def normalize_trails_args(args: list[str]) -> list[str]:
+    """Let --trails work as a flag by inserting the default cluster group."""
+
+    normalized: list[str] = []
+    for index, arg in enumerate(args):
+        normalized.append(arg)
+        if arg != "--trails":
+            continue
+        next_arg = args[index + 1] if index + 1 < len(args) else None
+        if next_arg is None or next_arg.startswith("-"):
+            normalized.append("cluster")
+    return normalized
+
+
 @app.command()
 def run(
     csv_input: str = typer.Argument(..., help="Local CSV path or HTTP(S) URL."),
@@ -77,6 +94,20 @@ def run(
         "embedumap", "--branding", help="Brand shown at the top left of the page."
     ),
     opacity: float = typer.Option(1.0, "--opacity", min=0.0, max=1.0, help="Base point opacity."),
+    inactive_opacity: float = typer.Option(
+        0.08,
+        "--inactive-opacity",
+        min=0.0,
+        max=1.0,
+        help="Opacity for points outside the active filters or timeline range.",
+    ),
+    trail_opacity: float = typer.Option(
+        0.28,
+        "--trail-opacity",
+        min=0.0,
+        max=1.0,
+        help="Opacity for trail lines.",
+    ),
     bar_chart_corner: str = typer.Option(
         "top-right",
         "--bar-chart-corner",
@@ -113,6 +144,12 @@ def run(
     dimensions: int = typer.Option(
         DEFAULT_DIMENSIONS, "--dimensions", min=128, help="Embedding dimensionality."
     ),
+    batch_size: int = typer.Option(
+        DEFAULT_BATCH_SIZE,
+        "--batch-size",
+        min=1,
+        help="Rows to embed per Gemini request. Increase if your model quota allows it.",
+    ),
     max_image_size: int | None = typer.Option(
         None,
         "--max-image-size",
@@ -125,6 +162,19 @@ def run(
     output_path: Path = typer.Option(
         Path("index.html"), "--output", help="Where to write the HTML output."
     ),
+    trails_raw: list[str] = typer.Option(
+        [],
+        "--trails",
+        help=(
+            "Build trail paths from time-bucket centroids. "
+            "Pass columns like --trails theme,cluster; use --trails alone for cluster trails."
+        ),
+    ),
+    trail_period: str | None = typer.Option(
+        None,
+        "--trail-period",
+        help='Optional trail bucket size like "1min", "1h", "daily", "weekly", or "2Q".',
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Validate inputs without embedding or writing HTML."
     ),
@@ -133,6 +183,17 @@ def run(
 
     popup_style = normalize_popup_style(popup_style)
     bar_chart_corner = normalize_bar_chart_corner(bar_chart_corner)
+    timeline_column = timeline_column.strip() if timeline_column else None
+    trail_columns = split_option_values(trails_raw)
+    trail_period = trail_period.strip() if trail_period else None
+    if trail_columns and not timeline_column:
+        raise typer.BadParameter("--trails requires --timeline-column.")
+    if trail_period and not trail_columns:
+        raise typer.BadParameter("--trail-period requires --trails.")
+    try:
+        parse_trail_period(trail_period)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     config = BuildConfig(
         csv_input=csv_input,
         output_path=output_path.expanduser().resolve(),
@@ -144,9 +205,11 @@ def run(
         filter_columns=split_option_values(filter_columns_raw),
         cluster_columns=split_option_values(cluster_columns_raw) or ["embeddings"],
         label_columns=split_option_values(label_columns_raw),
-        timeline_column=timeline_column.strip() if timeline_column else None,
+        timeline_column=timeline_column,
         branding=branding.strip() or "embedumap",
         opacity=opacity,
+        inactive_opacity=inactive_opacity,
+        trail_opacity=trail_opacity,
         bar_chart_corner=bar_chart_corner,
         axis_labels=axis_labels,
         popup_style=popup_style,
@@ -154,9 +217,12 @@ def run(
         cluster_naming_model=cluster_naming_model.strip(),
         cluster_names=cluster_names,
         dimensions=dimensions,
+        batch_size=batch_size,
         max_image_size=max_image_size,
         sample=sample,
         dry_run=dry_run,
+        trail_columns=trail_columns,
+        trail_period=trail_period,
     )
     if not config.embedding_columns and not config.image_columns and not config.audio_columns:
         raise typer.BadParameter(
@@ -190,6 +256,7 @@ def run(
 def main() -> None:
     """Console-script entry point."""
 
+    sys.argv[1:] = normalize_trails_args(sys.argv[1:])
     app()
 
 

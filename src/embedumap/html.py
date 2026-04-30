@@ -77,8 +77,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   #timeline-bar {
     display: none;
+    flex-wrap: nowrap;
+    overflow-x: auto;
     border-top: 1px solid var(--stroke);
     border-bottom: none;
+    scrollbar-width: thin;
   }
 
   #timeline-bar.visible { display: flex; }
@@ -122,7 +125,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   select,
   .toolbar button,
   #timeline-play,
+  #timeline-cumulative,
   .popup-close {
+    font-size: 0.68rem;
+    text-transform: uppercase;
     color: var(--text);
     background: var(--bg-chip);
     border: 1px solid var(--stroke);
@@ -132,16 +138,30 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
   }
 
+  #control-search {
+    color: var(--text);
+    background: var(--bg-chip);
+    border: 1px solid var(--stroke);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+    min-width: 120px;
+    width: clamp(140px, 14vw, 220px);
+  }
+
   .button-group button:hover,
   select:hover,
+  #control-search:hover,
   .toolbar button:hover,
   #timeline-play:hover,
+  #timeline-cumulative:hover,
   .popup-close:hover {
     border-color: var(--stroke-strong);
     background: rgba(255, 255, 255, 0.08);
   }
 
-  .button-group button.active {
+  .button-group button.active,
+  #timeline-cumulative.active {
     color: #eff6ff;
     background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
     border-color: transparent;
@@ -492,7 +512,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     display: grid;
     gap: 6px;
     padding: 0;
-    pointer-events: none;
+    pointer-events: auto;
     background: transparent;
   }
 
@@ -545,7 +565,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     display: flex;
     gap: 8px;
     align-items: center;
+    padding: 2px 4px;
+    border-radius: 6px;
     transition: opacity 180ms ease, transform 180ms ease;
+  }
+
+  .bar-row.trail-hit {
+    cursor: pointer;
+  }
+
+  .bar-row.active-trail {
+    background: rgba(96, 165, 250, 0.14);
   }
 
   .bar-label,
@@ -594,10 +624,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     align-items: center;
     gap: 10px;
     flex: 1;
+    flex-wrap: nowrap;
     min-width: min(720px, 100%);
   }
 
   #timeline-wrap.visible { display: flex; }
+
+  #timeline-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 1 auto;
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
 
   .timeline-label {
     color: var(--text-dim);
@@ -613,11 +653,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     border-color: rgba(239, 68, 68, 0.4);
   }
 
+  .timeline-slider-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .timeline-slider-control input[type=range] {
+    width: clamp(84px, 11vw, 150px);
+    accent-color: var(--accent);
+  }
+
+  .timeline-slider-value {
+    min-width: 42px;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
   .range-block {
     position: relative;
     display: flex;
     align-items: center;
     flex: 1;
+    min-width: 160px;
     height: 28px;
   }
 
@@ -679,7 +740,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   .timeline-duration {
     position: absolute;
-    top: -18px;
+    top: -10px;
     left: 50%;
     transform: translateX(-50%);
     font-size: 11px;
@@ -710,12 +771,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     #timeline-wrap {
-      min-width: 100%;
+      min-width: 0;
     }
 
     .timeline-label {
       min-width: 70px;
       font-size: 0.75rem;
+    }
+
+    #timeline-tools {
+      gap: 6px;
+    }
+
+    .timeline-slider-control input[type=range] {
+      width: 76px;
     }
   }
 </style>
@@ -727,10 +796,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <div id="brand-title"></div>
       <div id="brand-subtitle"></div>
     </div>
+    <span class="label">Search</span>
+    <input id="control-search" type="search" placeholder="Type to filter" aria-label="Search rows">
     <span class="label">Color</span>
     <div id="color-group" class="button-group"></div>
     <span class="label">Filter</span>
     <div id="filter-group" class="button-group"></div>
+    <span id="trails-label" class="label" style="display:none">Trails</span>
+    <div id="trails-group" class="button-group" style="display:none">
+      <button id="trails-toggle" type="button">Trails</button>
+    </div>
     <div id="status-stack">
       <div id="summary" class="label"></div>
       <div id="axis-legend" aria-label="Projection axes">
@@ -756,7 +831,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   <div id="timeline-bar">
     <div id="timeline-wrap">
-      <button id="timeline-play" type="button">▶ Play</button>
+      <div id="timeline-tools">
+        <button id="timeline-play" type="button">&#9654; Play</button>
+        <button id="timeline-cumulative" type="button" aria-pressed="false">Cumulative</button>
+        <span class="label">Speed</span>
+        <div class="timeline-slider-control">
+          <input id="timeline-speed" type="range" min="0" max="10000" step="1" aria-label="Playback speed">
+          <span id="timeline-speed-value" class="timeline-slider-value"></span>
+        </div>
+        <span class="label">Opacity</span>
+        <div class="timeline-slider-control">
+          <input id="timeline-inactive-opacity" type="range" min="0" max="100" step="1" aria-label="Unselected opacity">
+          <span id="timeline-inactive-opacity-value" class="timeline-slider-value"></span>
+        </div>
+      </div>
       <span id="timeline-start" class="timeline-label"></span>
       <div class="range-block" id="timeline-range">
         <div class="timeline-line"></div>
@@ -800,7 +888,13 @@ const PALETTE = [
 const margin = { top: 18, right: 18, bottom: 18, left: 18 };
 const pointRadius = 4;
 const sliderMax = 10000;
-const playDurationMs = 12000;
+const speedSliderMax = 10000;
+const opacitySliderMax = 100;
+const opacitySliderExponent = 2.4;
+const minPlaybackDurationMs = 1000;
+const maxPlaybackDurationMs = 600000;
+const defaultPlaybackDurationMs = 30000;
+const PLAYBACK_MODES = ["slide", "reveal"];
 
 const plot = $("#plot");
 const overlay = d3.select("#overlay");
@@ -882,6 +976,55 @@ function formatDuration(ms0, ms1) {
   return months ? `${years}y ${months}m` : `${years}y`;
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function formatPlaybackDuration(ms) {
+  if (ms < 10000) return `${(ms / 1000).toFixed(1).replace(/\\.0$/, "")}s`;
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  return `${Math.round(ms / 60000)}m`;
+}
+
+function formatOpacity(value) {
+  const percent = clamp(value, 0, 1) * 100;
+  if (percent === 0) return "0%";
+  if (percent >= 99.5) return "100%";
+  if (percent >= 10) return `${percent.toPrecision(2).replace(/\\.0$/, "")}%`;
+  return `${percent.toPrecision(2)}%`;
+}
+
+function inactiveOpacity() {
+  return clamp(state.inactiveOpacity ?? DATA.inactiveOpacity ?? 0.08, 0, 1);
+}
+
+function opacityToSlider(value) {
+  return Math.round(Math.pow(clamp(value, 0, 1), 1 / opacitySliderExponent) * opacitySliderMax);
+}
+
+function sliderToOpacity(value) {
+  const ratio = clamp(Number(value), 0, opacitySliderMax) / opacitySliderMax;
+  return Math.pow(ratio, opacitySliderExponent);
+}
+
+function playbackDurationMs() {
+  return clamp(state.playDurationMs, minPlaybackDurationMs, maxPlaybackDurationMs);
+}
+
+function durationToSpeedSlider(durationMs) {
+  const minLog = Math.log(minPlaybackDurationMs);
+  const maxLog = Math.log(maxPlaybackDurationMs);
+  const value = clamp(durationMs, minPlaybackDurationMs, maxPlaybackDurationMs);
+  return Math.round(((maxLog - Math.log(value)) / (maxLog - minLog)) * speedSliderMax);
+}
+
+function speedSliderToDuration(value) {
+  const minLog = Math.log(minPlaybackDurationMs);
+  const maxLog = Math.log(maxPlaybackDurationMs);
+  const ratio = clamp(Number(value), 0, speedSliderMax) / speedSliderMax;
+  return Math.round(Math.exp(maxLog - ratio * (maxLog - minLog)));
+}
+
 function sliderToMs(value) {
   if (!DATA || DATA.timelineMin == null || DATA.timelineMax == null) return 0;
   return DATA.timelineMin + (Number(value) / sliderMax) * (DATA.timelineMax - DATA.timelineMin);
@@ -900,6 +1043,16 @@ function matchesFilters(row) {
   return true;
 }
 
+function matchesSearch(row) {
+  const query = state.searchQuery?.trim().toLowerCase();
+  if (!query) return true;
+  return [
+    row.label,
+    ...Object.values(row.raw ?? {}),
+    ...Object.values(row.tooltip ?? {}),
+  ].some((value) => String(value ?? "").toLowerCase().includes(query));
+}
+
 function inTimeline(row) {
   if (!DATA.timelineColumn || row.timelineMs == null) return !DATA.timelineColumn;
   return row.timelineMs >= state.timelineMin && row.timelineMs <= state.timelineMax;
@@ -915,11 +1068,11 @@ function colorScale() {
 }
 
 function sceneRows() {
-  const filtered = DATA.rows.filter(matchesFilters);
+  const filtered = DATA.rows.filter((row) => matchesFilters(row) && matchesSearch(row));
   const selectable = DATA.timelineColumn
     ? filtered.filter((row) => row.timelineMs != null && inTimeline(row))
     : filtered;
-  return { filtered, selectable };
+  return { all: DATA.rows, filtered, selectable };
 }
 
 function formatTimelineParam(ms) {
@@ -952,6 +1105,15 @@ function syncUrlState() {
   }
   if (state.sortColumn !== DATA.defaultSort) params.set("sort", state.sortColumn);
   if (!state.sortAsc) params.set("dir", "desc");
+  if (state.searchQuery.trim()) params.set("q", state.searchQuery.trim());
+  if (hasTrails() && state.trailsVisible) params.set("trails", "1");
+  if (state.playbackMode !== "slide") params.set("playback", state.playbackMode);
+  if (Math.abs(state.playDurationMs - defaultPlaybackDurationMs) > 50) {
+    params.set("speed", String(Math.round(state.playDurationMs / 1000)));
+  }
+  if (Math.abs(state.inactiveOpacity - (DATA.inactiveOpacity ?? 0.08)) > 0.0005) {
+    params.set("inactiveOpacity", state.inactiveOpacity.toFixed(3));
+  }
   const query = params.toString();
   const nextUrl = `${window.location.pathname}${query ? `?${query}` : ""}`;
   window.history.replaceState({}, "", nextUrl);
@@ -977,6 +1139,19 @@ function applyUrlState() {
   const sortColumn = params.get("sort");
   if (sortColumn && DATA.sortColumns.includes(sortColumn)) state.sortColumn = sortColumn;
   state.sortAsc = params.get("dir") !== "desc";
+  state.searchQuery = params.get("q") ?? "";
+  const trailParam = params.get("trails");
+  if (trailParam != null) state.trailsVisible = !["0", "false", "off", "hide", "hidden"].includes(trailParam);
+  const playbackMode = params.get("playback");
+  if (playbackMode && PLAYBACK_MODES.includes(playbackMode)) state.playbackMode = playbackMode;
+  const speedSeconds = Number(params.get("speed"));
+  if (Number.isFinite(speedSeconds) && speedSeconds > 0) {
+    state.playDurationMs = clamp(speedSeconds * 1000, minPlaybackDurationMs, maxPlaybackDurationMs);
+  }
+  const inactiveOpacityParam = Number(params.get("inactiveOpacity"));
+  if (Number.isFinite(inactiveOpacityParam)) {
+    state.inactiveOpacity = clamp(inactiveOpacityParam, 0, 1);
+  }
 }
 
 function clearSelectionBox() {
@@ -1026,6 +1201,7 @@ function updateBarChart(scene) {
   barChartHead.innerHTML = `<span>Visible by ${escapeHtml(displaySortLabel(state.colorBy))}</span><span>${escapeHtml(suffix)}</span>`;
   const maxCount = d3.max(entries, (entry) => entry.count) ?? 1;
   const scale = colorScale();
+  const trailIds = new Map(activeTrails().map((trail) => [trail.groupLabel, trail.groupId]));
   const rows = barChartBody.selectAll(".bar-row").data(entries, (entry) => entry.key);
   rows.exit()
     .style("opacity", 0)
@@ -1043,6 +1219,8 @@ function updateBarChart(scene) {
   enter.append("div").attr("class", "bar-count");
 
   const merged = enter.merge(rows)
+    .classed("trail-hit", (entry) => trailIds.has(entry.key))
+    .classed("active-trail", (entry) => trailIds.get(entry.key) === state.highlightTrailId)
     .style("opacity", 1)
     .style("transform", "translateY(0)");
   merged.select(".bar-label")
@@ -1055,24 +1233,175 @@ function updateBarChart(scene) {
   merged.sort((left, right) => d3.descending(left.count, right.count) || d3.ascending(left.label, right.label));
 }
 
+let trailDots = [];
+
+function hasTrails() {
+  return Boolean(DATA?.centroidTrails && Object.keys(DATA.centroidTrails).length);
+}
+
+function activeTrailColumn() {
+  if (!hasTrails()) return null;
+  return DATA.centroidTrails[state.colorBy] ? state.colorBy : "cluster";
+}
+
+function activeTrails() {
+  const column = activeTrailColumn();
+  return column ? DATA.centroidTrails[column] ?? [] : [];
+}
+
+function trailPointInRange(point) {
+  if (!DATA.timelineColumn || DATA.timelineMin == null || DATA.timelineMax == null) return true;
+  const start = Number.isFinite(point.timeStartMs) ? point.timeStartMs : Number.NEGATIVE_INFINITY;
+  const end = Number.isFinite(point.timeEndMs) ? point.timeEndMs : Number.POSITIVE_INFINITY;
+  return end >= state.timelineMin && start <= state.timelineMax;
+}
+
+function trailSegmentInRange(left, right) {
+  if (!DATA.timelineColumn || DATA.timelineMin == null || DATA.timelineMax == null) return true;
+  const start = Math.min(left.timeStartMs ?? Infinity, right.timeStartMs ?? Infinity);
+  const end = Math.max(left.timeEndMs ?? -Infinity, right.timeEndMs ?? -Infinity);
+  return end >= state.timelineMin && start <= state.timelineMax;
+}
+
+function trailRange(key) {
+  let min = Infinity;
+  let max = 0;
+  for (const trail of activeTrails()) {
+    for (const point of trail.points) {
+      min = Math.min(min, point[key] ?? 0);
+      max = Math.max(max, point[key] ?? 0);
+    }
+  }
+  return { min, max: max || 1 };
+}
+
+function trailColorScale() {
+  const labels = activeTrails().map((trail) => trail.groupLabel);
+  return d3.scaleOrdinal().domain(labels).range(PALETTE);
+}
+
+function strokeTrailSegment(ctx, left, right) {
+  ctx.beginPath();
+  ctx.moveTo(xScale(left.x), yScale(left.y));
+  ctx.lineTo(xScale(right.x), yScale(right.y));
+  ctx.stroke();
+}
+
+function strokeTrailArrow(ctx, left, right) {
+  const x1 = xScale(left.x), y1 = yScale(left.y);
+  const x2 = xScale(right.x), y2 = yScale(right.y);
+  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.beginPath();
+  ctx.moveTo(mx - 6 * Math.cos(angle - 0.45), my - 6 * Math.sin(angle - 0.45));
+  ctx.lineTo(mx, my);
+  ctx.lineTo(mx - 6 * Math.cos(angle + 0.45), my - 6 * Math.sin(angle + 0.45));
+  ctx.stroke();
+}
+
+function drawTrails(ctx) {
+  trailDots = [];
+  if (!hasTrails() || !state.trailsVisible) return;
+  const trails = activeTrails();
+  if (!trails.length) return;
+  const scale = trailColorScale();
+  const filterVal = state.filters[activeTrailColumn()] ?? "";
+  const { min: countMin, max: countMax } = trailRange("count");
+  const { min: stdMin, max: stdMax } = trailRange("std");
+  const trailOpacity = clamp(DATA.trailOpacity ?? 0.28, 0, 1);
+  const inactiveAlpha = inactiveOpacity();
+
+  for (const trail of trails) {
+    const points = trail.points;
+    if (points.length < 2) continue;
+    const filtered = Boolean(filterVal && trail.groupLabel !== filterVal);
+    const selectedTrail = state.highlightTrailId == null || state.highlightTrailId === trail.groupId;
+    const highlighted = !filtered && selectedTrail;
+    const activeAlpha = filtered || !selectedTrail ? inactiveAlpha : Math.min(1, trailOpacity * 2.2);
+    const contextAlpha = inactiveAlpha;
+    const activePoints = points.map((point) => trailPointInRange(point));
+    const visiblePoints = points.filter((point, index) => activePoints[index]);
+    const color = scale(trail.groupLabel);
+
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = highlighted ? 2.5 : 1.2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.globalAlpha = contextAlpha;
+    for (let i = 0; i < points.length - 1; i += 1) strokeTrailSegment(ctx, points[i], points[i + 1]);
+    ctx.globalAlpha = activeAlpha;
+    for (let i = 0; i < points.length - 1; i += 1) {
+      if (trailSegmentInRange(points[i], points[i + 1])) strokeTrailSegment(ctx, points[i], points[i + 1]);
+    }
+    if (highlighted) {
+      for (let i = 0; i < points.length - 1; i += 1) {
+        if (trailSegmentInRange(points[i], points[i + 1])) strokeTrailArrow(ctx, points[i], points[i + 1]);
+      }
+    }
+
+    for (let i = 0; i < points.length; i += 1) {
+      const point = points[i];
+      const px = xScale(point.x), py = yScale(point.y);
+      const countNorm = countMax > countMin ? (point.count - countMin) / (countMax - countMin) : 0.5;
+      const r = (highlighted ? 5 : 3) + countNorm * (highlighted ? 5 : 3);
+      const stdNorm = stdMax > stdMin ? ((point.std ?? 0) - stdMin) / (stdMax - stdMin) : 0;
+      const blur = r + stdNorm * r * 2;
+      ctx.globalAlpha = (activePoints[i] ? activeAlpha : contextAlpha) * (0.45 + 0.55 * (i / Math.max(1, points.length - 1)));
+
+      const gradient = ctx.createRadialGradient(px, py, 0, px, py, blur);
+      gradient.addColorStop(0, color);
+      gradient.addColorStop(stdNorm < 0.3 ? 0.72 : 0.42, color);
+      gradient.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(px, py, blur, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(255,255,255,0.64)";
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, Math.PI * 2);
+      ctx.stroke();
+      if (activePoints[i] && highlighted) trailDots.push({ px, py, r: Math.max(r, blur), trail, point });
+    }
+
+    if (highlighted && visiblePoints.length) {
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "bold 10px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(visiblePoints[0].timeLabel, xScale(visiblePoints[0].x), yScale(visiblePoints[0].y) - 8);
+      ctx.textBaseline = "top";
+      const last = visiblePoints[visiblePoints.length - 1];
+      ctx.fillText(last.timeLabel, xScale(last.x), yScale(last.y) + 8);
+    }
+    ctx.restore();
+  }
+}
+
 function draw(scene = sceneRows()) {
   if (!DATA || !state) return;
-  const rows = scene.filtered;
+  const rows = scene.all;
   const scale = colorScale();
   const selected = state.selectedIds;
   const hasSelection = selected.size > 0;
-  const baseOpacity = Math.max(0, Math.min(1, DATA.opacity ?? 1));
+  const activeIds = new Set(scene.selectable.map((row) => row.id));
+  const baseOpacity = clamp(DATA.opacity ?? 1, 0, 1);
+  const inactiveAlpha = inactiveOpacity();
+  const pointOpacity = baseOpacity;
   const ctx = plot.getContext("2d");
   ctx.clearRect(0, 0, width, height);
 
   for (let pass = 0; pass < 2; pass += 1) {
     for (const row of rows) {
-      const active = inTimeline(row) || !DATA.timelineColumn;
+      const active = activeIds.has(row.id);
       const chosen = selected.has(row.id);
-      let alpha = active ? baseOpacity : Math.max(0.03, baseOpacity * 0.12);
-      if (hasSelection && !chosen) alpha = active ? Math.max(0.05, baseOpacity * 0.16) : Math.max(0.02, baseOpacity * 0.06);
+      let alpha = active ? pointOpacity : inactiveAlpha;
+      if (hasSelection && !chosen) alpha = inactiveAlpha;
       if (hasSelection && chosen) alpha = baseOpacity;
-      const bright = alpha >= Math.max(0.25, baseOpacity * 0.45);
+      const bright = alpha >= Math.max(0.25, pointOpacity * 0.45);
       if (pass === 0 && bright) continue;
       if (pass === 1 && !bright) continue;
 
@@ -1089,6 +1418,7 @@ function draw(scene = sceneRows()) {
       }
     }
   }
+  drawTrails(ctx);
   ctx.globalAlpha = 1;
   updateSummary(scene);
   rebuildSpatialIndex(scene);
@@ -1291,9 +1621,19 @@ function buildColorControls() {
     const button = event.target.closest("[data-color]");
     if (!button) return;
     state.colorBy = button.dataset.color;
+    state.highlightTrailId = null;
     for (const candidate of group.querySelectorAll("button")) {
       candidate.classList.toggle("active", candidate === button);
     }
+    refreshScene();
+  });
+}
+
+function buildSearchControl() {
+  const input = $("#control-search");
+  input.value = state.searchQuery;
+  input.addEventListener("input", (event) => {
+    state.searchQuery = event.target.value;
     refreshScene();
   });
 }
@@ -1330,6 +1670,30 @@ function buildSortControls() {
   syncSortControls();
 }
 
+function buildTrailsControls() {
+  if (!hasTrails()) return;
+  $("#trails-label").style.display = "";
+  const group = $("#trails-group");
+  group.style.display = "";
+  $("#trails-toggle").addEventListener("click", () => {
+    pausePlay();
+    state.trailsVisible = !state.trailsVisible;
+    state.highlightTrailId = null;
+    syncTrailControls();
+    refreshScene();
+  });
+  barChartBody.node().addEventListener("click", (event) => {
+    const row = event.target.closest(".bar-row.trail-hit");
+    if (!row) return;
+    const datum = d3.select(row).datum();
+    const trail = activeTrails().find((candidate) => candidate.groupLabel === datum?.key);
+    if (!trail) return;
+    state.highlightTrailId = state.highlightTrailId === trail.groupId ? null : trail.groupId;
+    refreshScene();
+  });
+  syncTrailControls();
+}
+
 function syncControlsFromState() {
   for (const button of $("#color-group").querySelectorAll("button")) {
     button.classList.toggle("active", button.dataset.color === state.colorBy);
@@ -1337,8 +1701,18 @@ function syncControlsFromState() {
   for (const select of $("#filter-group").querySelectorAll("select")) {
     select.value = state.filters[select.dataset.filter] ?? "";
   }
+  $("#control-search").value = state.searchQuery;
   syncSortControls();
   syncTimelineUi();
+  syncTrailControls();
+  syncPlaybackControls();
+}
+
+function syncTrailControls() {
+  const button = $("#trails-toggle");
+  if (!button) return;
+  button.classList.toggle("active", state.trailsVisible);
+  button.setAttribute("aria-pressed", String(state.trailsVisible));
 }
 
 function syncTimelineUi() {
@@ -1357,6 +1731,23 @@ function syncTimelineUi() {
   $("#timeline-fill").style.width = `${((end - start) / sliderMax) * 100}%`;
 }
 
+function syncPlaybackControls() {
+  const cumulativeButton = $("#timeline-cumulative");
+  if (cumulativeButton) {
+    const cumulative = state.playbackMode === "reveal";
+    cumulativeButton.classList.toggle("active", cumulative);
+    cumulativeButton.setAttribute("aria-pressed", String(cumulative));
+  }
+  const speedInput = $("#timeline-speed");
+  const speedValue = $("#timeline-speed-value");
+  if (speedInput) speedInput.value = String(durationToSpeedSlider(state.playDurationMs));
+  if (speedValue) speedValue.textContent = formatPlaybackDuration(state.playDurationMs);
+  const opacityInput = $("#timeline-inactive-opacity");
+  const opacityValue = $("#timeline-inactive-opacity-value");
+  if (opacityInput) opacityInput.value = String(opacityToSlider(inactiveOpacity()));
+  if (opacityValue) opacityValue.textContent = formatOpacity(inactiveOpacity());
+}
+
 function pausePlay() {
   state.playing = false;
   $("#timeline-play").textContent = "▶ Play";
@@ -1371,8 +1762,10 @@ function stepPlay(timestamp) {
   playPrev = timestamp;
   const windowSize = state.timelineMax - state.timelineMin;
   const fullRange = Math.max(1, DATA.timelineMax - DATA.timelineMin);
-  state.timelineMax = Math.min(DATA.timelineMax, state.timelineMax + (delta * fullRange) / playDurationMs);
-  state.timelineMin = Math.max(DATA.timelineMin, state.timelineMax - windowSize);
+  state.timelineMax = Math.min(DATA.timelineMax, state.timelineMax + (delta * fullRange) / playbackDurationMs());
+  if (state.playbackMode === "slide") {
+    state.timelineMin = Math.max(DATA.timelineMin, state.timelineMax - windowSize);
+  }
   syncTimelineUi();
   refreshScene();
   if (state.timelineMax >= DATA.timelineMax) {
@@ -1390,8 +1783,14 @@ function startPlay() {
     state.timelineMin = DATA.timelineMin;
     state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
   } else if (state.timelineMax >= DATA.timelineMax) {
-    state.timelineMin = DATA.timelineMin;
-    state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
+    if (state.playbackMode === "reveal") {
+      const replayStart = Math.max(DATA.timelineMin, DATA.timelineMax - windowSize);
+      state.timelineMin = Math.min(state.timelineMin, replayStart);
+      state.timelineMax = Math.min(DATA.timelineMax, state.timelineMin + windowSize);
+    } else {
+      state.timelineMin = DATA.timelineMin;
+      state.timelineMax = Math.min(DATA.timelineMax, DATA.timelineMin + windowSize);
+    }
   }
   state.playing = true;
   playPrev = null;
@@ -1413,6 +1812,7 @@ function buildTimelineControls() {
   maxInput.max = String(sliderMax);
 
   minInput.addEventListener("input", () => {
+    pausePlay();
     const next = Math.min(Number(minInput.value), Number(maxInput.value) - 100);
     minInput.value = String(next);
     state.timelineMin = sliderToMs(next);
@@ -1421,6 +1821,7 @@ function buildTimelineControls() {
   });
 
   maxInput.addEventListener("input", () => {
+    pausePlay();
     const next = Math.max(Number(maxInput.value), Number(minInput.value) + 100);
     maxInput.value = String(next);
     state.timelineMax = sliderToMs(next);
@@ -1456,7 +1857,8 @@ function buildTimelineControls() {
   };
 
   timelineFill.addEventListener("pointerdown", (event) => {
-    if (state.playing || event.button !== 0) return;
+    if (event.button !== 0) return;
+    pausePlay();
     event.preventDefault();
     rangeDrag = {
       pointerId: event.pointerId,
@@ -1472,12 +1874,32 @@ function buildTimelineControls() {
   timelineFill.addEventListener("pointerup", finishRangeDrag);
   timelineFill.addEventListener("pointercancel", finishRangeDrag);
 
+  $("#timeline-cumulative").addEventListener("click", () => {
+    pausePlay();
+    state.playbackMode = state.playbackMode === "reveal" ? "slide" : "reveal";
+    syncPlaybackControls();
+    syncUrlState();
+  });
+
+  $("#timeline-speed").addEventListener("input", (event) => {
+    state.playDurationMs = speedSliderToDuration(event.target.value);
+    syncPlaybackControls();
+    syncUrlState();
+  });
+
+  $("#timeline-inactive-opacity").addEventListener("input", (event) => {
+    state.inactiveOpacity = sliderToOpacity(event.target.value);
+    syncPlaybackControls();
+    refreshScene();
+  });
+
   $("#timeline-play").addEventListener("click", () => {
     if (state.playing) pausePlay();
     else startPlay();
   });
 
   syncTimelineUi();
+  syncPlaybackControls();
 }
 
 function pointerPosition(event) {
@@ -1560,11 +1982,28 @@ function bindInteractions() {
       if (dragState.moved) updateSelectionBox();
       return;
     }
-    if (!quadtree || state.playing || event.buttons > 0) {
+    if (state.playing || event.buttons > 0) {
       hideTooltip();
       return;
     }
     const { x, y } = pointerPosition(event);
+    const hitDot = trailDots.find((dot) => Math.hypot(dot.px - x, dot.py - y) <= dot.r + 4);
+    if (hitDot) {
+      tooltip.innerHTML = `<div class="tooltip-label">${escapeHtml(hitDot.trail.groupLabel)}</div>`
+        + `<div class="tooltip-grid">`
+        + `<div class="tooltip-key">Period</div><div class="tooltip-value">${escapeHtml(hitDot.point.timeLabel)}</div>`
+        + `<div class="tooltip-key">Points</div><div class="tooltip-value">${hitDot.point.count.toLocaleString()}</div>`
+        + `<div class="tooltip-key">Spread</div><div class="tooltip-value">${(hitDot.point.std ?? 0).toFixed(3)}</div>`
+        + `</div>`;
+      tooltip.style.display = "block";
+      tooltip.style.left = `${Math.max(12, Math.min(window.innerWidth - tooltip.offsetWidth - 12, event.clientX + 14))}px`;
+      tooltip.style.top = `${Math.max(12, Math.min(window.innerHeight - tooltip.offsetHeight - 12, event.clientY + 14))}px`;
+      return;
+    }
+    if (!quadtree) {
+      hideTooltip();
+      return;
+    }
     const found = quadtree.find(x, y, 12);
     if (!found) {
       hideTooltip();
@@ -1614,9 +2053,15 @@ function boot() {
       selectedIds: new Set(),
       sortColumn: DATA.defaultSort,
       sortAsc: true,
+      searchQuery: "",
       timelineMin: DATA.timelineMin,
       timelineMax: DATA.timelineMax,
       playing: false,
+      playbackMode: "slide",
+      playDurationMs: defaultPlaybackDurationMs,
+      inactiveOpacity: clamp(DATA.inactiveOpacity ?? 0.08, 0, 1),
+      trailsVisible: false,
+      highlightTrailId: null,
     };
     globalThis.state = state;
     globalThis.renderPopup = renderPopup;
@@ -1633,9 +2078,11 @@ function boot() {
       : DATA.yDomain;
 
     buildColorControls();
+    buildSearchControl();
     buildFilterControls();
     buildSortControls();
     buildTimelineControls();
+    buildTrailsControls();
     bindInteractions();
     resize();
     syncUrlState();
