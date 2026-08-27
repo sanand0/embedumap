@@ -745,6 +745,36 @@ def cached_vectors(
     }
 
 
+def cached_vectors_by_content(
+    connection: duckdb.DuckDBPyConnection,
+    content_hashes: list[str],
+    model: str,
+    dimensions: int,
+) -> dict[str, np.ndarray]:
+    """Fetch portable text/audio cache hits from older source/path-specific keys."""
+
+    if not content_hashes:
+        return {}
+    placeholders = ", ".join("?" for _ in content_hashes)
+    rows = connection.execute(
+        f"""
+        SELECT content_hash, vector
+        FROM (
+          SELECT content_hash, vector,
+            ROW_NUMBER() OVER (PARTITION BY content_hash ORDER BY updated_at DESC) AS rank
+          FROM embedding_cache
+          WHERE content_hash IN ({placeholders}) AND model = ? AND dimensions = ?
+        )
+        WHERE rank = 1
+        """,
+        [*content_hashes, model, dimensions],
+    ).fetchall()
+    return {
+        str(content_hash): np.frombuffer(vector_blob, dtype=np.float32, count=dimensions).copy()
+        for content_hash, vector_blob in rows
+    }
+
+
 def store_cached_vectors(
     connection: duckdb.DuckDBPyConnection,
     rows: list[tuple[str, str, int, str, str, int, bytes]],
@@ -809,6 +839,21 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
     cache_keys = [cache_key for cache_key, _ in cache_entries]
     with with_cache(cache_path) as connection:
         cached = cached_vectors(connection, cache_keys, config.dimensions)
+        portable_indices = [
+            idx
+            for idx, cache_key in enumerate(cache_keys)
+            if cache_key not in cached and not records[idx].images
+        ]
+        portable = cached_vectors_by_content(
+            connection,
+            [cache_entries[idx][1] for idx in portable_indices],
+            config.model,
+            config.dimensions,
+        )
+    for idx in portable_indices:
+        cache_key, content_hash = cache_entries[idx]
+        if content_hash in portable:
+            cached[cache_key] = portable[content_hash]
 
     vectors = np.empty((len(records), config.dimensions), dtype=np.float32)
     missing_indices = [idx for idx, cache_key in enumerate(cache_keys) if cache_key not in cached]
@@ -1218,6 +1263,7 @@ def project_umap(vectors: np.ndarray) -> np.ndarray:
         min_dist=UMAP_MIN_DIST,
         metric="cosine",
         random_state=42,
+        n_jobs=1,
     )
     return reducer.fit_transform(reduced).astype(np.float32)
 

@@ -363,6 +363,77 @@ def test_record_cache_key_ignores_max_image_size_without_images() -> None:
     assert original_hash == resized_hash
     assert original_key == resized_key
 
+def test_embed_records_reuses_cache_across_source_paths(monkeypatch, tmp_path: Path) -> None:
+    frames = pd.DataFrame([{"title": "same text"}])
+
+    class Record:
+        def __init__(self, row_index: int) -> None:
+            self.row_index = row_index
+            self.text_payload = "same text"
+            self.audio_metadata_text = ""
+            self.images = []
+            self.audios = []
+
+    config = base_config(output_path=tmp_path / "index.html", dimensions=4, batch_size=1)
+    calls = 0
+
+    def fake_embed_batch_once(*args: object, **kwargs: object) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr("embedumap.core.gemini_client", lambda: object())
+    monkeypatch.setattr("embedumap.core.embed_batch_once", fake_embed_batch_once)
+
+    first = CsvSource(label="/old/path/sample.csv", frame=frames, csv_path=None, csv_url=None)
+    second = CsvSource(label="/new/path/sample.csv", frame=frames, csv_path=None, csv_url=None)
+    first_vectors = embed_records(first, [Record(0)], config)
+    second_vectors = embed_records(second, [Record(99)], config)
+
+    assert calls == 1
+    np.testing.assert_array_equal(second_vectors, first_vectors)
+
+
+def test_embed_records_does_not_portably_reuse_image_cache(monkeypatch, tmp_path: Path) -> None:
+    frames = pd.DataFrame([{"image": "photo.png"}])
+
+    class Record:
+        row_index = 0
+        text_payload = ""
+        audio_metadata_text = ""
+        images = [object()]
+        audios = []
+
+    config = base_config(output_path=tmp_path / "index.html", dimensions=4, batch_size=1)
+    calls = 0
+
+    def fake_record_cache_key(
+        source: CsvSource,
+        record: object,
+        model: str,
+        dimensions: int,
+        max_image_size: int | None,
+    ) -> tuple[str, str]:
+        return (f"key:{source.label}", "same-content")
+
+    def fake_embed_batch_once(*args: object, **kwargs: object) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return np.array([[float(calls), 0.0, 0.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr("embedumap.core.record_cache_key", fake_record_cache_key)
+    monkeypatch.setattr("embedumap.core.build_content", lambda *args: object())
+    monkeypatch.setattr("embedumap.core.gemini_client", lambda: object())
+    monkeypatch.setattr("embedumap.core.embed_batch_once", fake_embed_batch_once)
+
+    first = CsvSource(label="/old/path/sample.csv", frame=frames, csv_path=None, csv_url=None)
+    second = CsvSource(label="/new/path/sample.csv", frame=frames, csv_path=None, csv_url=None)
+    embed_records(first, [Record()], config)
+    embed_records(second, [Record()], config)
+
+    assert calls == 2
+
+
 def test_embed_records_checkpoints_successful_batches(monkeypatch, tmp_path: Path) -> None:
     source = CsvSource(
         label="sample.csv",
