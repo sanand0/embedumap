@@ -826,7 +826,6 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
     console.print(
         f"Embedding cache hit: reused {len(records) - len(missing_indices)} of {len(records)} rows from {cache_path}"
     )
-    rows_to_store: list[tuple[str, str, int, str, str, int, bytes]] = []
     for batch_indices in batch_slices(missing_indices, config.batch_size):
         batch = [records[idx] for idx in batch_indices]
         batch_range = f"{batch_indices[0] + 1}-{batch_indices[-1] + 1}"
@@ -848,6 +847,7 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
 
                 time.sleep(delay)
                 delay = min(delay * 2, 120)
+        rows_to_store: list[tuple[str, str, int, str, str, int, bytes]] = []
         for idx, vector in zip(batch_indices, batch_vectors, strict=True):
             vectors[idx] = vector
             cache_key, content_hash = cache_entries[idx]
@@ -862,9 +862,10 @@ def embed_records(source: CsvSource, records: list[RowRecord], config: BuildConf
                     vector.astype(np.float32).tobytes(),
                 )
             )
+        # Checkpoint each successful batch so interrupted large runs resume here.
+        with with_cache(cache_path) as connection:
+            store_cached_vectors(connection, rows_to_store)
 
-    with with_cache(cache_path) as connection:
-        store_cached_vectors(connection, rows_to_store)
     return vectors
 
 

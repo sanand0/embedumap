@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -20,6 +21,7 @@ from embedumap.core import (
     compute_trails,
     default_cache_path,
     direct_cluster_labels,
+    embed_records,
     normalized_image_bytes,
     parse_trail_period,
     record_cache_key,
@@ -360,3 +362,53 @@ def test_record_cache_key_ignores_max_image_size_without_images() -> None:
 
     assert original_hash == resized_hash
     assert original_key == resized_key
+
+def test_embed_records_checkpoints_successful_batches(monkeypatch, tmp_path: Path) -> None:
+    source = CsvSource(
+        label="sample.csv",
+        frame=pd.DataFrame([{"title": f"row {index}"} for index in range(4)]),
+        csv_path=None,
+        csv_url=None,
+    )
+
+    class Record:
+        def __init__(self, index: int) -> None:
+            self.row_index = index
+            self.text_payload = f"row {index}"
+            self.audio_metadata_text = ""
+            self.images = []
+            self.audios = []
+
+    records = [Record(index) for index in range(4)]
+    config = base_config(
+        output_path=tmp_path / "index.html",
+        dimensions=4,
+        batch_size=2,
+    )
+    calls = 0
+
+    def fake_embed_batch_once(*args: object, **kwargs: object) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("forced second-batch failure")
+        return np.array(
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+
+    monkeypatch.setattr("embedumap.core.gemini_client", lambda: object())
+    monkeypatch.setattr("embedumap.core.embed_batch_once", fake_embed_batch_once)
+
+    try:
+        embed_records(source, records, config)
+    except RuntimeError as exc:
+        assert str(exc) == "forced second-batch failure"
+    else:
+        raise AssertionError("expected the forced second-batch failure")
+
+    cache_path = default_cache_path(config.output_path)
+    with duckdb.connect(str(cache_path), read_only=True) as connection:
+        cached_rows = connection.execute("SELECT COUNT(*) FROM embedding_cache").fetchone()[0]
+    assert cached_rows == 2
+
